@@ -1,0 +1,10 @@
+/Debug/
+/out/
+/packages/
+/pilot/
+/x64/
+/CMakeSettings.json
+/*.vcxproj*
+/packages.config
+/pilot.sln
+/.vs/
