@@ -17,12 +17,7 @@ public:
         data[key] = value;
     }
 
-    // 读取操作：共享锁（允许多线程并发读）
-    // std::optional<Value> get(const Key& key) const {
-    //     std::shared_lock lock(rw_mutex); // 共享锁
-    //     auto it = data.find(key);
-    //     return (it != data.end()) ? std::optional<Value>(it->second) : std::nullopt;
-    // }
+    // 使用前检查key存在
     Value get(const Key& key) const {
         std::shared_lock lock(rw_mutex);    // 共享锁
         return data.at(key);
