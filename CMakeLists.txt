@@ -10,6 +10,7 @@ if(MSVC)
 endif()
 
 # --- 查找库 ---
+find_package(FFmpeg REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Torch REQUIRED)
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
@@ -39,6 +40,7 @@ set_target_properties(Tst PROPERTIES OUTPUT_NAME "test_runner")
 set(ALL_LIBS 
     ${OpenCV_LIBS} 
     ${TORCH_LIBRARIES} 
+    ${FFMPEG_LIBRARIES}
     Python3::Python 
     Threads::Threads
 )
@@ -48,6 +50,7 @@ set(ALL_INCLUDES
     ${OpenCV_INCLUDE_DIRS}
     ${TORCH_INCLUDE_DIRS}
     ${Python3_INCLUDE_DIRS}
+    ${FFMPEG_INCLUDE_DIRS}
 )
 
 # 应用到 PilotApp

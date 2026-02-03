@@ -88,7 +88,7 @@ int PilotWebServer::set_camera_interface() {
 
 int PilotWebServer::launch_camera(const std::string& camera_id, const std::string& rtsp_url) {
 	// 测试连接并获取元数据
-	cv::VideoCapture cap(rtsp_url);
+	cv::VideoCapture cap(rtsp_url,cv::CAP_FFMPEG);
 	if (!cap.isOpened()) {
 		std::cerr << "Failed to open rtsp stream:" << rtsp_url << std::endl;
 		return -1;
@@ -155,6 +155,11 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 			// ==========================================
 
 		// 调试用，上线删除
+		if (input_frame.empty()) {
+			std::cout << "[Warning] Frame is empty! Skipping..." << std::endl;
+			// 如果是连续空帧，可能需要 break 或者 continue
+			continue;
+		}
 		cv::imshow("Pilot Training Real-time", input_frame);
 		if (cv::waitKey(1) == 27) break;
 	}

@@ -1,9 +1,10 @@
 #include "service/service.hpp"
 #include <iostream>
+#include <opencv2/opencv.hpp>
+#include <opencv2/videoio/registry.hpp>
 
 class TestablePilotWebServer : public PilotWebServer {
 public:
-    // 暴露公共接口来调用父类的私有函数
     int test_launch_camera(const std::string& id, const std::string& url) {
         camera_thread_manager.set(id, true);
         return this->launch_camera(id, url);
@@ -22,7 +23,6 @@ int main(int argc, char** argv) {
         std::cout << "Usage: ./test [rtsp_url]. Using default: " << test_url << std::endl;
     }
 
-    // 实例化服务器对象
     TestablePilotWebServer test_server;
     std::string camera_id = "test_cam_001";
 
