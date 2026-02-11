@@ -1,7 +1,5 @@
 #include "service/service.hpp"
 #include <iostream>
-#include <opencv2/opencv.hpp>
-#include <opencv2/videoio/registry.hpp>
 
 class TestablePilotWebServer : public PilotWebServer {
 public:
@@ -12,13 +10,11 @@ public:
 };
 
 int main(int argc, char** argv) {
-    // 获取输入参数
     std::string test_url;
     if (argc > 1) {
         test_url = argv[1];
     }
     else {
-        // 默认测试地址（这里是MediaMTX推送的本地视频文件）
         test_url = "rtsp://127.0.0.1:8554/live";
         std::cout << "Usage: ./test [rtsp_url]. Using default: " << test_url << std::endl;
     }

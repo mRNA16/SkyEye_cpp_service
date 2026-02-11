@@ -26,6 +26,7 @@ private:
 
 protected:
 	int launch_camera(const std::string& camera_id,const std::string& input_url);
+	int extract_features(const std::string& camera_id, const std::string& input_url);
 
 	httplib::Server server_;
 	ThreadSafeDict<std::string, bool> camera_thread_manager;

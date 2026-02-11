@@ -67,7 +67,7 @@ namespace WebServerUtils {
                     std::function<void(bool, const json&)> callback) {
         std::thread([=]() {
             httplib::Client cli(host);
-            cli.set_connection_timeout(5); // 5�볬ʱ
+            cli.set_connection_timeout(5);
 
             httplib::Headers headers = {
                 {"Content-Type", "application/json"},

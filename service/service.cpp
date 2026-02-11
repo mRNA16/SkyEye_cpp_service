@@ -1,6 +1,9 @@
 #include "service.hpp"
 #include "config.hpp"
 #include "utils/WebServerUtils.hpp"
+#include <onnxruntime_cxx_api.h>
+#include <opencv2/opencv.hpp>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -15,8 +18,7 @@ int PilotWebServer::boot() {
 }
 
 int PilotWebServer::init() {
-	// ×ÊÔ´·ÖÅä£¬³õÊ¼»¯µÈ
-	// TODO: ºóÐø²»¶Ï²¹³ä
+	// TODO:
 	return 0;
 }
 
@@ -30,17 +32,14 @@ int PilotWebServer::set_server_logger() {
 }
 
 int PilotWebServer::set_camera_interface() {
-	// ------------------¼à¿ØÉÏÏß-----------------------
 	server_.Post("/launch_camera", [this](const httplib::Request& req, httplib::Response& res) {
 		if (WebServerUtils::check_head(req, res)) return;
-		// TODO: ºóÐø¸ù¾ÝÐèÒª²¹³äÔªÊý¾Ý×Ö¶Î
 		std::vector<std::string> meta_fields = { "camera_id", "video_url" };
 		if (WebServerUtils::check_field(req, res, meta_fields)) return;
 		json request = json::parse(req.body);
 		std::string camera_id = request["camera_id"];
 		std::string rtsp_url = request["video_url"];
 
-		//TODO: ÕâÀï²¹³ä¹¦ÄÜÏà¹ØÉèÖÃ
 
 		json response;
 		if (!camera_thread_manager.has(camera_id) || camera_thread_manager.get(camera_id) == false) {
@@ -59,7 +58,6 @@ int PilotWebServer::set_camera_interface() {
 		res.set_content(response.dump(), "application/json");
 	});
 
-	// ------------------¼à¿ØÏÂÏß-----------------------
 	server_.Post("/offline_camera", [this](const httplib::Request& req, httplib::Response& res) {
 		if (WebServerUtils::check_head(req, res)) return;
 		std::vector<std::string> meta_fields = { "camera_id" };
@@ -87,7 +85,6 @@ int PilotWebServer::set_camera_interface() {
 }
 
 int PilotWebServer::launch_camera(const std::string& camera_id, const std::string& rtsp_url) {
-	// ²âÊÔÁ¬½Ó²¢»ñÈ¡ÔªÊý¾Ý
 	cv::VideoCapture cap(rtsp_url,cv::CAP_FFMPEG);
 	if (!cap.isOpened()) {
 		std::cerr << "Failed to open rtsp stream:" << rtsp_url << std::endl;
@@ -96,10 +93,9 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	int width_ = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
 	int height_ = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
 	int fps_ = static_cast<int>(cap.get(cv::CAP_PROP_FPS));
-	if (fps_ <= 0 || fps_ > 60) fps_ = 15; // Ä¬ÈÏ¶µµ×Ö¡ÂÊ
+	if (fps_ <= 0 || fps_ > 60) fps_ = 15;
 	cap.release();
 	
-	// FFmpegÀ­Á÷²¢×ªÎªraw BGR24
 	std::ostringstream cmd;
 	cmd << "ffmpeg -loglevel error "
 		<< "-rtsp_transport tcp "
@@ -120,16 +116,12 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 		return -1;
 	}
 
-	// ´´½¨Ö¡»º³åÇø
 	const size_t frame_size = static_cast<size_t>(width_) * height_ * 3;
 	uchar* buffer = new uchar[frame_size];
 	cv::Mat input_frame(height_, width_, CV_8UC3);
-	cv::Mat output_frame(height_, width_, CV_8UC3);
 	std::cout << "Start processing the stream: " << width_ << "x" << height_ << " @ " << fps_ << "fps" << std::endl;
 
-	// TODO:Ëã·¨³õÊ¼»¯½Ó¿Ú
 
-	// ÊÓÆµ´¦ÀíÖ÷Ìå
 	while (camera_thread_manager.get(camera_id)) {
 		size_t bytes_read = fread(buffer,1,frame_size,pipe_in);
 		if (bytes_read != frame_size) {
@@ -139,32 +131,15 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 
 		input_frame.data = buffer;
 
-		// ==========================================
-			// ¡¾Ô¤ÁôÎ»ÖÃ 1¡¿£ºËã·¨Ä£ÐÍ´¦Àí
-			// Example: 
-			// auto results = PilotModel->Inference(frame);
-			// DrawResults(frame, results);
-			// ==========================================
-
-
-		// ==========================================
-			// ¡¾Ô¤ÁôÎ»ÖÃ 2¡¿£ºWebRTC ÍÆÁ÷
-			// ½«´¦ÀíºóµÄ frame ·¢ËÍ¸ø WebRTC Ä£¿é
-			// Example:
-			// WebRTCServer->PushFrame(frame);
-			// ==========================================
-
-		// µ÷ÊÔÓÃ£¬ÉÏÏßÉ¾³ý
 		if (input_frame.empty()) {
 			std::cout << "[Warning] Frame is empty! Skipping..." << std::endl;
-			// Èç¹ûÊÇÁ¬Ðø¿ÕÖ¡£¬¿ÉÄÜÐèÒª break »òÕß continue
 			continue;
 		}
+		// è°ƒè¯•ä½¿ç”¨ï¼Œä¸Šçº¿åŽ»é™¤
 		cv::imshow("Pilot Training Real-time", input_frame);
 		if (cv::waitKey(1) == 27) break;
 	}
 
-	// ÇåÀí»ØÊÕ
 	delete[] buffer;
 #ifdef _WIN32
 	if (pipe_in) _pclose(pipe_in);
@@ -174,6 +149,56 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	std::cout << "Stream process end" << std::endl;
 
 	return 0;
+}
+
+int PilotWebServer::extract_features(const std::string& camera_id, const std::string& rtsp_url) {
+	// è§†é¢‘æµå¤„ç†
+	cv::VideoCapture cap(rtsp_url, cv::CAP_FFMPEG);
+	if (!cap.isOpened()) {
+		std::cerr << "Failed to open rtsp stream:" << rtsp_url << std::endl;
+		return -1;
+	}
+	int width_ = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
+	int height_ = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+	int fps_ = static_cast<int>(cap.get(cv::CAP_PROP_FPS));
+	if (fps_ <= 0 || fps_ > 60) fps_ = 15;
+	cap.release();
+
+	std::ostringstream cmd;
+	cmd << "ffmpeg -loglevel error "
+		<< "-rtsp_transport tcp "
+		<< "-i " << rtsp_url
+		<< " -f rawvideo -pix_fmt bgr24 "
+		<< " -s " << width_ << "x" << height_
+		<< " -r " << fps_
+		<< " pipe:1";
+
+#ifdef _WIN32
+	FILE* pipe_in = _popen(cmd.str().c_str(), "rb");
+#else
+	FILE* pipe_in = popen(cmd.str().c_str(), "r");
+#endif
+	if (!pipe_in) {
+		std::cerr << "Failed to open FFmpeg pipe" << std::endl;
+		return -1;
+	}
+
+	// åˆ›å»ºç¼“å†²åŒºï¼Œä¸ºi3dæä¾›è¾“å…¥å‡†å¤‡
+	const size_t frame_size = static_cast<size_t>(width_) * height_ * 3;
+	uchar* buffer = new uchar[frame_size];
+	cv::Mat input_frame(height_, width_, CV_8UC3);
+	std::vector<cv::Mat> window_frames;
+	int frame_count = 0;
+
+	while(camera_thread_manager.get(camera_id)){
+		size_t bytes_read = fread(buffer, 1, frame_size, pipe_in);
+		if (bytes_read != frame_size){
+			std::cerr << "Frames read have error.Video Processing has break." << std::endl;
+			break;
+		}
+
+		input_frame.data = buffer;
+	}
 }
 
 int PilotWebServer::distribute_GPU(int occupy, int design) {

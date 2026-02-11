@@ -8,18 +8,16 @@ template <typename Key, typename Value>
 class ThreadSafeDict {
 private:
     std::unordered_map<Key, Value> data;
-    mutable std::shared_mutex rw_mutex; // 读写锁
+    mutable std::shared_mutex rw_mutex;
 
 public:
-    // 写入操作：独占锁
     void set(const Key& key, const Value& value) {
         std::unique_lock lock(rw_mutex);
         data[key] = value;
     }
 
-    // 使用前检查key存在
     Value get(const Key& key) const {
-        std::shared_lock lock(rw_mutex);    // 共享锁
+        std::shared_lock lock(rw_mutex);
         return data.at(key);
     }
 
