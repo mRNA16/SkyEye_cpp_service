@@ -18,7 +18,13 @@ int PilotWebServer::boot() {
 }
 
 int PilotWebServer::init() {
-	// TODO:
+	std::cout << "Loading I3D Model from: " << I3D_MODEL_PATH << std::endl;
+	i3d_model_ = std::make_shared<I3D>();
+	if (i3d_model_->Init(I3D_MODEL_PATH, 0) != 0) {
+		std::cerr << "Failed to initialize I3D model!" << std::endl;
+		return -1;
+	}
+	std::cout << "I3D Model initialized successfully." << std::endl;
 	return 0;
 }
 
@@ -188,17 +194,44 @@ int PilotWebServer::extract_features(const std::string& camera_id, const std::st
 	uchar* buffer = new uchar[frame_size];
 	cv::Mat input_frame(height_, width_, CV_8UC3);
 	std::vector<cv::Mat> window_frames;
-	int frame_count = 0;
+	
+	std::cout << "Start feature extraction for camera: " << camera_id << std::endl;
 
+	int cnt = 0;
 	while(camera_thread_manager.get(camera_id)){
 		size_t bytes_read = fread(buffer, 1, frame_size, pipe_in);
 		if (bytes_read != frame_size){
-			std::cerr << "Frames read have error.Video Processing has break." << std::endl;
+			std::cerr << "Frames read have error. Video Processing has break." << std::endl;
 			break;
 		}
 
-		input_frame.data = buffer;
+		// 深拷贝当前帧，防止缓冲区被下一帧覆盖
+		cv::Mat current_frame(height_, width_, CV_8UC3, buffer);
+		window_frames.push_back(current_frame.clone());
+
+		// 达到滑窗大小（16帧）时进行特征提取
+		if (window_frames.size() == CHUNK_SIZE) {
+			// 推理
+			std::vector<float> features = i3d_model_->Run(window_frames);
+			
+			if (!features.empty()) {
+				// TODO: 这里留出时序动作检测的对接
+				std::cout <<++cnt<<"Extracted features: " << features[0] << std::endl;
+			}
+
+			// 滑动窗口：移除最老的一帧（这里可以调整滑动步长，目前步长为 1）
+			window_frames.erase(window_frames.begin());
+		}
 	}
+
+	delete[] buffer;
+#ifdef _WIN32
+	if (pipe_in) _pclose(pipe_in);
+#else
+	if (pipe_in) pclose(pipe_in);
+#endif
+	std::cout << "Feature extraction end for camera: " << camera_id << std::endl;
+	return 0;
 }
 
 int PilotWebServer::distribute_GPU(int occupy, int design) {
