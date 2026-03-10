@@ -12,6 +12,7 @@
 #include "json.hpp"
 #include "thread_safe_dict.hpp"
 #include "../feature/feature.hpp"
+#include "../feature/actionformer.hpp"
 
 using json = nlohmann::json;
 
@@ -35,5 +36,8 @@ protected:
 
 	// I3D 特征提取模型
 	std::shared_ptr<I3D> i3d_model_;
+
+	// ActionFormer 时序动作检测模型
+	std::shared_ptr<ActionFormer> actionformer_model_;
 };
 

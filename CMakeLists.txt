@@ -32,6 +32,7 @@ set(COMMON_SOURCES
     "service/service.cpp"
     "utils/WebServerUtils.cpp"
     "feature/feature.cpp"
+    "feature/actionformer.cpp"
 )
 
 set(APP_SOURCES "service/entry.cpp" ${COMMON_SOURCES})

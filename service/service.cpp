@@ -25,6 +25,15 @@ int PilotWebServer::init() {
 		return -1;
 	}
 	std::cout << "I3D Model initialized successfully." << std::endl;
+
+	std::cout << "Loading ActionFormer Model from: " << ACTIONFORMER_MODEL_PATH << std::endl;
+	actionformer_model_ = std::make_shared<ActionFormer>();
+	if (actionformer_model_->Init(ACTIONFORMER_MODEL_PATH, 0, 11) != 0) {
+		std::cerr << "Failed to initialize ActionFormer model!" << std::endl;
+		return -1;
+	}
+	std::cout << "ActionFormer Model initialized successfully." << std::endl;
+
 	return 0;
 }
 
@@ -129,9 +138,21 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 
 
 	while (camera_thread_manager.get(camera_id)) {
-		size_t bytes_read = fread(buffer,1,frame_size,pipe_in);
-		if (bytes_read != frame_size) {
-			std::cerr << "Frames read have error.Video Processing has break." << std::endl;
+		size_t total_bytes_read = 0;
+		while (total_bytes_read < frame_size) {
+			size_t bytes_read = fread(buffer + total_bytes_read, 1, frame_size - total_bytes_read, pipe_in);
+			if (bytes_read == 0) {
+				break; // End of file or error
+			}
+			total_bytes_read += bytes_read;
+		}
+
+		if (total_bytes_read != frame_size) {
+			if (feof(pipe_in)) {
+				std::cerr << "End of ffmpeg stream reached." << std::endl;
+			} else {
+				std::cerr << "Error reading from ffmpeg pipe." << std::endl;
+			}
 			break;
 		}
 
@@ -193,36 +214,114 @@ int PilotWebServer::extract_features(const std::string& camera_id, const std::st
 	const size_t frame_size = static_cast<size_t>(width_) * height_ * 3;
 	uchar* buffer = new uchar[frame_size];
 	cv::Mat input_frame(height_, width_, CV_8UC3);
-	std::vector<cv::Mat> window_frames;
 	
 	std::cout << "Start feature extraction for camera: " << camera_id << std::endl;
 
-	int cnt = 0;
+	std::mutex mtx;
+	std::vector<cv::Mat> shared_window_frames;
+	std::string shared_current_action = "Background";
+	bool stream_running = true;
+
+	std::thread inference_thread([&]() {
+		std::vector<cv::Mat> local_window_frames;
+		int cnt = 0;
+		int local_total_frames = 0;
+		
+		while (stream_running || !shared_window_frames.empty()) {
+			bool has_enough_frames = false;
+			{
+				std::lock_guard<std::mutex> lock(mtx);
+				if (shared_window_frames.size() >= CHUNK_SIZE) {
+					local_window_frames.assign(shared_window_frames.begin(), shared_window_frames.begin() + CHUNK_SIZE);
+					has_enough_frames = true;
+					// Note: total_frames here roughly tracks what the oldest frame in the chunk corresponds to.
+					local_total_frames += 4; 
+				}
+			}
+
+			if (has_enough_frames) {
+				std::vector<float> features = i3d_model_->Run(local_window_frames);
+				if (!features.empty() && actionformer_model_) {
+                    cnt++;
+					std::vector<ActionSegment> actions = actionformer_model_->Run(features, static_cast<float>(fps_), CHUNK_SIZE);
+					float current_time = static_cast<float>(local_total_frames + CHUNK_SIZE) / fps_; // time of boundary
+					std::string predicted_action = "Background";
+					float max_score = 0.0f;
+					
+					for (const auto& action : actions) {
+						if (current_time >= action.start_time - 1.0f && current_time <= action.end_time + 1.0f) {
+							if (action.score > max_score) {
+								max_score = action.score;
+								predicted_action = "Action " + std::to_string(action.label) + " (" + std::to_string(action.score).substr(0, 4) + ")";
+							}
+						}
+					}
+					
+					std::cout << "[" << cnt << "] Extracted features: " << features[0] << " | predicted: " << predicted_action << std::endl;
+					
+					{
+						std::lock_guard<std::mutex> lock(mtx);
+						shared_current_action = predicted_action;
+						
+						// If the GPU is too slow, we drop frames to maintain real-time property.
+						// Otherwise we slide by 4 frames (stride=4).
+						int frames_to_erase = 4;
+						if (shared_window_frames.size() > CHUNK_SIZE * 2) {
+							std::cout << "drop happens!" << "\n";
+							frames_to_erase = shared_window_frames.size() - CHUNK_SIZE; // Drop excessive frames
+						}
+						shared_window_frames.erase(shared_window_frames.begin(), shared_window_frames.begin() + frames_to_erase);
+					}
+				} else {
+					// Fallback when inference yields empty
+					std::lock_guard<std::mutex> lock(mtx);
+					shared_window_frames.erase(shared_window_frames.begin(), shared_window_frames.begin() + 4);
+				}
+			} else {
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			}
+		}
+	});
+
+	int total_frames = 0;
 	while(camera_thread_manager.get(camera_id)){
-		size_t bytes_read = fread(buffer, 1, frame_size, pipe_in);
-		if (bytes_read != frame_size){
-			std::cerr << "Frames read have error. Video Processing has break." << std::endl;
+		size_t total_bytes_read = 0;
+		while (total_bytes_read < frame_size) {
+			size_t bytes_read = fread(buffer + total_bytes_read, 1, frame_size - total_bytes_read, pipe_in);
+			if (bytes_read == 0) {
+				break; 
+			}
+			total_bytes_read += bytes_read;
+		}
+
+		if (total_bytes_read != frame_size) {
+			if (feof(pipe_in)) {
+				std::cerr << "End of ffmpeg stream reached." << std::endl;
+			} else {
+				std::cerr << "Error reading from ffmpeg pipe." << std::endl;
+			}
 			break;
 		}
 
-		// 深拷贝当前帧，防止缓冲区被下一帧覆盖
 		cv::Mat current_frame(height_, width_, CV_8UC3, buffer);
-		window_frames.push_back(current_frame.clone());
-
-		// 达到滑窗大小（16帧）时进行特征提取
-		if (window_frames.size() == CHUNK_SIZE) {
-			// 推理
-			std::vector<float> features = i3d_model_->Run(window_frames);
-			
-			if (!features.empty()) {
-				// TODO: 这里留出时序动作检测的对接
-				std::cout <<++cnt<<"Extracted features: " << features[0] << std::endl;
-			}
-
-			// 滑动窗口：移除最老的一帧（这里可以调整滑动步长，目前步长为 1）
-			window_frames.erase(window_frames.begin());
+		
+		std::string display_action;
+		{
+			std::lock_guard<std::mutex> lock(mtx);
+			shared_window_frames.push_back(current_frame.clone());
+			display_action = shared_current_action;
 		}
+
+		total_frames++;
+
+		// Draw and display immediately (real-time 15FPS guaranteed)
+		cv::putText(current_frame, display_action, cv::Point(50, 50), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
+		cv::imshow("Extracted Features Stream", current_frame);
+		if (cv::waitKey(1) == 27) break;
 	}
+
+	stream_running = false;
+	inference_thread.join();
 
 	delete[] buffer;
 #ifdef _WIN32
