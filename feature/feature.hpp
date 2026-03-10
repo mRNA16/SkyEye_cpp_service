@@ -4,6 +4,7 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <string>
+#include <./service/config.hpp>
 
 class I3D {
 public:
@@ -36,11 +37,11 @@ private:
     std::vector<const char*> output_node_names_ = {"output"};
 
     // 输入形状参数
-    int64_t batch_size_ = 1;
-    int64_t channels_ = 3;
-    int64_t frames_count_ = 16;
-    int64_t height_ = 224;
-    int64_t width_ = 224;
+    int64_t batch_size_ = BATCH_SIZE;
+    int64_t channels_ = CHANNEL;
+    int64_t frames_count_ = CHUNK_SIZE;
+    int64_t height_ = INPUT_H;
+    int64_t width_ = INPUT_W;
 
     /**
      * @brief 预处理：将 cv::Mat 序列转换为 Tensor 数据
