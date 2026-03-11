@@ -1,4 +1,4 @@
-#include "service/service.hpp"
+#include "../service/service.hpp"
 #include <iostream>
 
 /**
@@ -6,16 +6,17 @@
  */
 class TestablePilotWebServer : public PilotWebServer {
 public:
-    // 模拟初始化
+    // 模拟初始化模型
     int test_init() {
-        return this->init();
+        return this->loadModels();
     }
 
-    // 模拟特征提取
-    int test_extract_features(const std::string& id, const std::string& url) {
+    // 模拟摄像流拉取及算法处理（测试新架构下的生产者-消费者模式）
+    int test_launch_and_extract(const std::string& id, const std::string& url) {
         // 在子线程管理中注册该摄像头，模拟其正在运行
         camera_thread_manager.set(id, true);
-        return this->extract_features(id, url);
+        // 调用重构后的主入口，里面包含了两条流水线：显示队列与算法队列
+        return this->launch_camera(id, url);
     }
 };
 
@@ -34,23 +35,23 @@ int main(int argc, char** argv) {
     TestablePilotWebServer test_server;
     
     // 1. 初始化模型
-    std::cout << "\n[1/2] --- 正在初始化 I3D 模型 ---" << std::endl;
+    std::cout << "\n[1/2] --- 正在初始化人工智能模型（I3D & ActionFormer） ---" << std::endl;
     if (test_server.test_init() != 0) {
-        std::cerr << "错误: I3D 模型初始化失败！请检查模型文件路径。" << std::endl;
+        std::cerr << "错误: 模型初始化失败！请检查模型文件路径配置。" << std::endl;
         return -1;
     }
-    std::cout << "I3D 模型初始化成功。" << std::endl;
+    std::cout << "模型初始化成功。" << std::endl;
 
-    // 2. 测试特征提取
-    std::string camera_id = "test_feature_cam_001";
-    std::cout << "\n[2/2] --- 正在启动特征提取测试 ---" << std::endl;
+    // 2. 测试组合模块
+    std::string camera_id = "test_combined_cam_001";
+    std::cout << "\n[2/2] --- 正在启动混合架构测试(直播流 + 排队特征提取) ---" << std::endl;
     std::cout << "输入源: " << test_url << std::endl;
     
-    // 该方法会进入循环读取视频帧，按 Ctrl+C 或断开流来停止
-    int result = test_server.test_extract_features(camera_id, test_url);
+    // 该方法会进入生产者循环，并开启显示线程和算法线程。可通过在显示窗口按 ESC 停止。
+    int result = test_server.test_launch_and_extract(camera_id, test_url);
 
     if (result == 0) {
-        std::cout << "\n特征提取测试执行完毕。" << std::endl;
+        std::cout << "\n混合测试执行完毕，算法线程已确保清空队列。" << std::endl;
     }
     else {
         std::cerr << "\n测试过程中出现错误，返回代码: " << result << std::endl;

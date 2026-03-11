@@ -139,7 +139,13 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	ThreadSafeQueue<cv::Mat> display_queue;
 	// 混合模式队列：内存中只允许堆积 200 帧，超过后自动写向系统硬盘缓存文件
 	std::string temp_algo_buffer = "algo_buffer_camera_" + camera_id + ".bin";
-	HybridVideoQueue algo_queue(200, temp_algo_buffer, width_, height_, CV_8UC3);
+	HybridVideoQueue frame_queue(200, temp_algo_buffer, width_, height_, CV_8UC3);
+	ThreadSafeQueue<std::vector<float>> feature_queue;
+
+	// 启动消费者线程
+	std::thread thread_live(&PilotWebServer::live, this, std::ref(display_queue));
+	std::thread thread_extract(&PilotWebServer::extract_features, this, std::ref(frame_queue), std::ref(feature_queue));
+	std::thread thread_predict(&PilotWebServer::actionformer_predict, this, std::ref(feature_queue), static_cast<float>(fps_));
 
 	// 生产者主循环
 	while (camera_thread_manager.get(camera_id)) {
@@ -169,13 +175,23 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 		}
 		
 		display_queue.push(input_frame.clone());
-		algo_queue.push(input_frame.clone());
+		frame_queue.push(input_frame.clone());
 	}
 
 	std::cout << "Waiting for consumers to finish..." << std::endl;
-	// 标记停止，队列取完后子线程将自动退出
+	
+	// 1.停止直播和i3d入口视频帧队列
 	display_queue.stop();
-	algo_queue.stop();
+	frame_queue.stop();
+	
+	// 2. 等待直播结束，这个过程会很快
+	if (thread_live.joinable()) thread_live.join();
+	// 3. 等待特征提取线程结束，这个过程慢，磁盘中挤压视频帧很多
+	if (thread_extract.joinable()) thread_extract.join();
+	
+	// 4. 特征提取宣告结束，ActionFormer消耗完所有的特征后结束
+	feature_queue.stop();
+	if (thread_predict.joinable()) thread_predict.join();
 
 	delete[] buffer;
 #ifdef _WIN32
@@ -189,70 +205,61 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 }
 
 int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue) {
-	// 直播消费者线程
-	std::thread display_thread([&]() {
-		cv::Mat frame;
-		while (display_queue.wait_and_pop(frame)) {
-			if (frame.empty()) continue;
-			std::string display_action;
-			cv::imshow("Pilot Training Real-time", frame);
-			if (cv::waitKey(1) == 27) { // ESC
-				break;
-			}
+	// 直播消费者处理
+	cv::Mat frame;
+	while (display_queue.wait_and_pop(frame)) {
+		if (frame.empty()) continue;
+		cv::imshow("Pilot Training Real-time", frame);
+		if (cv::waitKey(1) == 27) { // ESC
+			break;
 		}
-		cv::destroyWindow("Pilot Training Real-time");
-		std::cout << "[Display Thread] Exit." << std::endl;
-		});
-	display_thread.join();
+	}
+	cv::destroyWindow("Pilot Training Real-time");
+	std::cout << "[Display Thread] Exit." << std::endl;
 	return 0;
 }
 
-int PilotWebServer::extract_features(HybridVideoQueue& algo_queue) {
-	// i3d消费者线程
-	std::thread algo_thread([&]() {
-		cv::Mat frame;
-		std::deque<cv::Mat> local_window_frames;
+int PilotWebServer::extract_features(HybridVideoQueue& frame_queue,ThreadSafeQueue<std::vector<float>>& feature_queue) {
+	// i3d消费者处理
+	cv::Mat frame;
+	std::deque<cv::Mat> local_window_frames;
 
-		while (algo_queue.wait_and_pop(frame)) {
-			if (frame.empty()) continue;
-			local_window_frames.push_back(frame);
+	while (frame_queue.wait_and_pop(frame)) {
+		if (frame.empty()) continue;
+		local_window_frames.push_back(frame);
 
-			if (local_window_frames.size() >= CHUNK_SIZE) {
-				std::vector<cv::Mat> infer_frames(local_window_frames.begin(), local_window_frames.begin() + CHUNK_SIZE);
-				std::vector<float> features = this->i3d_model_->Run(infer_frames);
-				this->feature_queue_.push(features);
-				for (int i = 0; i < 4; ++i) local_window_frames.pop_front();
-			}
+		if (local_window_frames.size() >= CHUNK_SIZE) {
+			std::vector<cv::Mat> infer_frames(local_window_frames.begin(), local_window_frames.begin() + CHUNK_SIZE);
+			std::vector<float> features = this->i3d_model_->Run(infer_frames);
+			feature_queue.push(features);
+			for (int i = 0; i < 4; ++i) local_window_frames.pop_front();
 		}
-		std::cout << "[Algo Thread] Frame queue computed completely. End." << std::endl;
-		});
-	algo_thread.join();
+	}
+	std::cout << "[FeatureExtract] Frame queue computed completely. End." << std::endl;
 	return 0;
 }
 
-int PilotWebServer::actionformer_predict(ThreadSafeQueue<std::vector<float>>& feature_queue,float fps) {
-	// ActionFormer消费者线程
+int PilotWebServer::actionformer_predict(ThreadSafeQueue<std::vector<float>>& feature_queue, float fps) {
+	// ActionFormer消费者处理
 	std::vector<float> features;
 
-	std::thread actionformer_thread([&]() {
-		while (this->feature_queue_.wait_and_pop(features)) {
-			if (!features.empty() && this->actionformer_model_) {
-					std::vector<ActionSegment> actions = actionformer_model_->Run(features, static_cast<float>(fps), CHUNK_SIZE);
-					std::string predicted_action = "Background";
-					float max_score = 0.0f;
-					for (const auto& action : actions) {
-						if (action.score > max_score) {
-							max_score = action.score;
-							predicted_action = "[" + std::to_string(action.end_time - action.start_time).substr(0,2) + "]"
-								 + "Action " + std::to_string(action.label) + " (" + std::to_string(action.score).substr(0, 4) + ")";
-						}
-					}
-					std::cout << "[ActionFormer Thread] Predicted: " << predicted_action
-						<< " | Remaining feature queue size: " << this->feature_queue_.size() << std::endl;
+	while (feature_queue.wait_and_pop(features)) {
+		if (!features.empty() && this->actionformer_model_) {
+			std::vector<ActionSegment> actions = actionformer_model_->Run(features, static_cast<float>(fps), CHUNK_SIZE);
+			std::string predicted_action = "Background";
+			float max_score = 0.0f;
+			for (const auto& action : actions) {
+				if (action.score > max_score) {
+					max_score = action.score;
+					predicted_action = "[" + std::to_string(action.end_time - action.start_time).substr(0,2) + "]"
+						 + "Action " + std::to_string(action.label) + " (" + std::to_string(action.score).substr(0, 4) + ")";
 				}
+			}
+			std::cout << "[ActionFormer Thread] Predicted: " << predicted_action
+				<< " | Remaining feature queue size: " << feature_queue.size() << std::endl;
 		}
-	});
-	actionformer_thread.join();
+	}
+	std::cout << "[ActionFormer Thread] Exit." << std::endl;
 	return 0;
 }
 

@@ -49,6 +49,7 @@ public:
 
         if (mem_queue_.size() < mem_limit_ && disk_write_idx_ == disk_read_idx_) {
             mem_queue_.push(frame.clone());
+            std::cout << "[algoqueue]write into memory|frame_queue size: "<< mem_queue_.size() << std::endl;
         }
         else {
             // Write to disk file
@@ -57,6 +58,7 @@ public:
             file_stream_.write(reinterpret_cast<const char*>(frame.data), frame_size_);
             file_stream_.flush(); // Write to disk directly
             disk_write_idx_++;
+            std::cout << "[FrameQueue]write into binary file" << std::endl;
         }
         cond_var_.notify_one();
     }
@@ -80,6 +82,7 @@ public:
             file_stream_.clear();
             file_stream_.seekg(disk_read_idx_ * frame_size_, std::ios::beg);
             file_stream_.read(reinterpret_cast<char*>(frame.data), frame_size_);
+			std::cout << "[FrameQueue]consume from algo queue!|write_idx:" << disk_write_idx_ << "|read_idx:" << disk_read_idx_ << std::endl;
             disk_read_idx_++;
 
             // Reset disk file to save space when empty
@@ -88,6 +91,7 @@ public:
                 disk_write_idx_ = 0;
                 file_stream_.close();
                 file_stream_.open(temp_file_path_, std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
+                std::cout << "Finish disk processing!" << std::endl;
             }
         }
         return true;

@@ -1,8 +1,12 @@
-#include "service/service.hpp"
+#include "../service/service.hpp"
 #include <iostream>
 
 class TestablePilotWebServer : public PilotWebServer {
 public:
+    int test_init() {
+        return this->loadModels();
+    }
+
     int test_launch_camera(const std::string& id, const std::string& url) {
         camera_thread_manager.set(id, true);
         return this->launch_camera(id, url);
@@ -22,8 +26,13 @@ int main(int argc, char** argv) {
     TestablePilotWebServer test_server;
     std::string camera_id = "test_cam_001";
 
-    std::cout << "--- Starting Camera Launch Test ---" << std::endl;
+    std::cout << "--- Initializing Models (I3D, ActionFormer) ---" << std::endl;
+    if (test_server.test_init() != 0) {
+        std::cerr << "Failed to load models!" << std::endl;
+        return -1;
+    }
 
+    std::cout << "--- Starting Camera Launch Test (Producer-Consumer) ---" << std::endl;
     int result = test_server.test_launch_camera(camera_id, test_url);
 
     if (result == 0) {
