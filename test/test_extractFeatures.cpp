@@ -35,7 +35,7 @@ int main(int argc, char** argv) {
     TestablePilotWebServer test_server;
     
     // 1. 初始化模型
-    std::cout << "\n[1/2] --- 正在初始化人工智能模型（I3D & ActionFormer） ---" << std::endl;
+    std::cout << "\n[1/2] --- 正在初始化模型（I3D & ActionFormer） ---" << std::endl;
     if (test_server.test_init() != 0) {
         std::cerr << "错误: 模型初始化失败！请检查模型文件路径配置。" << std::endl;
         return -1;
@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
 
     // 2. 测试组合模块
     std::string camera_id = "test_combined_cam_001";
-    std::cout << "\n[2/2] --- 正在启动混合架构测试(直播流 + 排队特征提取) ---" << std::endl;
+    std::cout << "\n[2/2] --- 正在启动混合架构测试 ---" << std::endl;
     std::cout << "输入源: " << test_url << std::endl;
     
     // 该方法会进入生产者循环，并开启显示线程和算法线程。可通过在显示窗口按 ESC 停止。
