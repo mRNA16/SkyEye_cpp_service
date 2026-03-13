@@ -137,9 +137,9 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	std::cout << "Start processing the stream: " << width_ << "x" << height_ << " @ " << fps_ << "fps" << std::endl;
 
 	ThreadSafeQueue<cv::Mat> display_queue;
-	// 混合模式队列：内存中只允许堆积 200 帧，超过后自动写向系统硬盘缓存文件
+	// 堆开辟200帧空间，溢出以二进制文件存储至磁盘
 	std::string temp_algo_buffer = "algo_buffer_camera_" + camera_id + ".bin";
-	HybridVideoQueue frame_queue(200, temp_algo_buffer, width_, height_, CV_8UC3);
+	HybridVideoQueue frame_queue(200, temp_algo_buffer, 448, 448, CV_8UC3);
 	ThreadSafeQueue<std::vector<float>> feature_queue;
 
 	// 启动消费者线程
@@ -175,7 +175,11 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 		}
 		
 		display_queue.push(input_frame.clone());
-		frame_queue.push(input_frame.clone());
+		
+		// 调整大小至 448x448 以匹配模型输入并节省内存/磁盘开销
+		cv::Mat resized_frame;
+		cv::resize(input_frame, resized_frame, cv::Size(448, 448));
+		frame_queue.push(resized_frame);
 	}
 
 	std::cout << "Waiting for consumers to finish..." << std::endl;
@@ -251,7 +255,7 @@ int PilotWebServer::actionformer_predict(ThreadSafeQueue<std::vector<float>>& fe
 			for (const auto& action : actions) {
 				if (action.score > max_score) {
 					max_score = action.score;
-					predicted_action = "[" + std::to_string(action.end_time - action.start_time).substr(0,2) + "]"
+					predicted_action = "[" + std::to_string(action.start_time).substr(0,4)+"—" + std::to_string(action.end_time).substr(0, 4) + "]"
 						 + "Action " + std::to_string(action.label) + " (" + std::to_string(action.score).substr(0, 4) + ")";
 				}
 			}
