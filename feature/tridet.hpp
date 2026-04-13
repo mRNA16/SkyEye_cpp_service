@@ -39,6 +39,7 @@ public:
      * @return A list of the latest detected action segments
      */
     std::vector<ActionSegment> Run(const std::vector<float>& new_feature, float fps, int chunk_size);
+    std::vector<ActionSegment> RunOffline(const std::vector<std::vector<float>>& all_features, float fps, int chunk_size);
 
 private:
     Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "Tridet"};
