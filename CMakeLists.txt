@@ -15,6 +15,8 @@ find_package(OpenCV REQUIRED)
 find_package(Torch REQUIRED)
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 find_package(Threads REQUIRED)
+# --- libdatachannel 手动配置 ---
+set(VCPKG_ROOT "D:/vcpkg/installed/x64-windows")
 
 # --- ONNX Runtime 手动配置 ---
 set(ORT_DIR "D:/onnxruntime-win-x64-gpu-1.24.1")
@@ -31,6 +33,7 @@ find_library(ORT_CUDA_PROVIDER_LIB onnxruntime_providers_cuda
 set(COMMON_SOURCES
     "service/service.cpp"
     "utils/WebServerUtils.cpp"
+    "utils/H264Encoder.cpp"
     "feature/feature.cpp"
     "feature/tridet.cpp"
 )
@@ -51,10 +54,13 @@ set(ALL_LIBS
     ${ORT_CUDA_PROVIDER_LIB}
     Python3::Python 
     Threads::Threads
+    optimized "D:/vcpkg/installed/x64-windows/lib/datachannel.lib"
+    debug "D:/vcpkg/installed/x64-windows/debug/lib/datachannel.lib"
 )
 
 set(ALL_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}
+    "${VCPKG_ROOT}/include" # 解决 rtc 文件夹找不到的问题
     "${ORT_DIR}/include"  # 加入 ORT 头文件路径
     ${OpenCV_INCLUDE_DIRS}
     ${TORCH_INCLUDE_DIRS}
@@ -86,6 +92,8 @@ set(ORT_DLLS
     "${ORT_DIR}/lib/onnxruntime.dll"
     "${ORT_DIR}/lib/onnxruntime_providers_cuda.dll"
     "${ORT_DIR}/lib/onnxruntime_providers_shared.dll"
+    $<$<CONFIG:Debug>:D:/vcpkg/installed/x64-windows/debug/bin/datachannel.dll>
+    $<$<NOT:$<CONFIG:Debug>>:D:/vcpkg/installed/x64-windows/bin/datachannel.dll>
 )
 
 foreach(target PilotApp Tst TestFeatures)
