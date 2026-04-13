@@ -1,9 +1,12 @@
 #include "service.hpp"
 #include "config.hpp"
 #include "utils/WebServerUtils.hpp"
+#include "utils/H264Encoder.hpp"
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/opencv.hpp>
 #include <vector>
+#include <mutex>
+#include <future>
 
 using json = nlohmann::json;
 
@@ -11,6 +14,26 @@ int PilotWebServer::boot() {
 	std::cout << "PilotWebServer Init..." << std::endl;
 	loadModels();
 	set_server_logger();
+	
+	// 分别显式注册三个路径的 OPTIONS 预检请求（解决部分 httplib 版本正则通配失败的跨域问题）
+	auto cors_options_handler = [](const httplib::Request& req, httplib::Response& res) {
+		res.set_header("Access-Control-Allow-Origin", "*");
+		res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+		res.set_header("Access-Control-Allow-Headers", "Content-Type");
+		res.status = 200;
+	};
+	server_.Options("/launch_camera", cors_options_handler);
+	server_.Options("/offline_camera", cors_options_handler);
+	server_.Options("/get_report", cors_options_handler);
+	server_.Options("/webrtc/offer", cors_options_handler);
+	
+	// 对所有成功进入的常规请求（POST）最后带上跨域许可凭证
+	server_.set_post_routing_handler([](const auto& req, auto& res) {
+		res.set_header("Access-Control-Allow-Origin", "*");
+		res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+		res.set_header("Access-Control-Allow-Headers", "Content-Type");
+	});
+	
 	set_camera_interface();
 	server_.listen("0.0.0.0", 8080);
 
@@ -121,6 +144,86 @@ int PilotWebServer::set_camera_interface() {
 		res.set_content(response.dump(), "application/json");
 	});
 
+	// WebRTC 信令端点 (Offer -> Answer)
+	server_.Post("/webrtc/offer", [this](const httplib::Request& req, httplib::Response& res) {
+		json data;
+		try {
+			data = json::parse(req.body);
+		} catch (...) {
+			res.status = 400;
+			res.set_content("Invalid JSON", "text/plain");
+			return;
+		}
+
+		std::string camera_id = data.value("camera_id", "");
+		std::string sdp = data.value("sdp", "");
+		if (camera_id.empty() || sdp.empty()) {
+			res.status = 400;
+			res.set_content("Missing camera_id or sdp", "text/plain");
+			return;
+		}
+
+		rtc::Configuration config;
+		auto pc = std::make_shared<rtc::PeerConnection>(config);
+		
+		// 使用 Description::Video 创建支持 H.264 的视频轨道
+		rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
+		video.addH264Codec(96); // 96 为 H.264 的常用 Payload Type
+		auto local_track = pc->addTrack(video);
+
+		auto session = std::make_shared<WebRTCSession>();
+		session->pc = pc;
+		// forward encoded NALUs to the local track
+		session->send_video = [local_track](const rtc::byte* data, size_t size) {
+			try {
+				if (local_track) local_track->send(data, size);
+			} catch (...) {}
+		};
+
+		{
+			std::lock_guard<std::mutex> lock(sessions_mtx);
+			webrtc_sessions[camera_id].push_back(session);
+		}
+
+		pc->onStateChange([this, camera_id, session](rtc::PeerConnection::State state) {
+			std::cout << "[WebRTC] Camera " << camera_id << " State: " << state << std::endl;
+			if (state == rtc::PeerConnection::State::Closed || state == rtc::PeerConnection::State::Failed) {
+				std::lock_guard<std::mutex> lock(sessions_mtx);
+				auto& sessions = webrtc_sessions[camera_id];
+				sessions.erase(std::remove(sessions.begin(), sessions.end(), session), sessions.end());
+			}
+		});
+
+		// 必须使用 shared_ptr 封装 promise，因为回调是异步的，原 local 变量生命周期不足
+		auto answer_promise = std::make_shared<std::promise<std::string>>();
+		auto answer_future = answer_promise->get_future();
+		auto done = std::make_shared<std::atomic<bool>>(false);
+		
+		pc->onLocalDescription([answer_promise, done](rtc::Description description) {
+			if (!done->exchange(true)) {
+				answer_promise->set_value(std::string(description));
+			}
+		});
+
+		try {
+			pc->setRemoteDescription(rtc::Description(sdp, rtc::Description::Type::Offer));
+		} catch (const std::exception& e) {
+			res.status = 500;
+			res.set_content(std::string("SDP Error: ") + e.what(), "text/plain");
+			return;
+		}
+
+		if (answer_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+			json response;
+			response["type"] = "answer";
+			response["sdp"] = answer_future.get();
+			res.set_content(response.dump(), "application/json");
+		} else {
+			res.status = 500;
+			res.set_content("WebRTC Signaling Timeout", "text/plain");
+		}
+	});
+
 	return 0;
 }
 
@@ -128,6 +231,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	cv::VideoCapture cap(rtsp_url, cv::CAP_FFMPEG);
 	if (!cap.isOpened()) {
 		std::cerr << "Failed to open rtsp stream:" << rtsp_url << std::endl;
+		camera_thread_manager.set(camera_id, false);
 		return -1;
 	}
 	int width_ = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
@@ -166,7 +270,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	ThreadSafeQueue<std::vector<float>> feature_queue;
 
 	// 启动消费者线程
-	std::thread thread_live(&PilotWebServer::live, this, std::ref(display_queue));
+	std::thread thread_live(&PilotWebServer::live, this, std::ref(display_queue), camera_id);
 	std::thread thread_extract(&PilotWebServer::extract_features, this, std::ref(frame_queue), std::ref(feature_queue));
 	std::thread thread_predict(&PilotWebServer::tridet_predict, this, std::ref(feature_queue), static_cast<float>(fps_), camera_id);
 
@@ -231,18 +335,55 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	return 0;
 }
 
-int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue) {
+int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::string& camera_id) {
 	// 直播消费者处理
 	cv::Mat frame;
+	H264Encoder encoder;
+	bool encoder_init = false;
+
 	while (display_queue.wait_and_pop(frame)) {
 		if (frame.empty()) continue;
-		cv::imshow("Pilot Training Real-time", frame);
+
+		// 网页 WebRTC 视频输出
+		{
+			std::lock_guard<std::mutex> lock(sessions_mtx);
+			if (webrtc_sessions.count(camera_id) && !webrtc_sessions[camera_id].empty()) {
+				if (!encoder_init) {
+					encoder_init = encoder.Init(frame.cols, frame.rows, 15);
+				}
+				if (encoder_init) {
+					encoder.Encode(frame, [this, &camera_id](const uint8_t* data, size_t size) {
+						// 注意：此处回调是同步触发的，已经在外层 sessions_mtx 的锁保护下
+						// 因此绝对不能再次通过 std::lock_guard 锁定同一个 mutex，否则会导致死锁或 system_error
+						auto& active_sessions = this->webrtc_sessions[camera_id];
+						int sent_count = 0;
+						for (auto& session : active_sessions) {
+							if (session->pc->state() == rtc::PeerConnection::State::Connected) {
+								try {
+									if (session->send_video) {
+										session->send_video(reinterpret_cast<const rtc::byte*>(data), size);
+										sent_count++;
+									}
+								} catch (...) {}
+							}
+						}
+						// 采样日志输出，避免过快刷屏
+						static int frame_cnt = 0;
+						if (sent_count > 0 && frame_cnt++ % 60 == 0) {
+							std::cout << "[WebRTC] Streaming to " << sent_count << " peers for " << camera_id << std::endl;
+						}
+					});
+				}
+			}
+		}
+
+		cv::imshow("Pilot_" + camera_id, frame);
 		if (cv::waitKey(1) == 27) { // ESC
 			break;
 		}
 	}
-	cv::destroyWindow("Pilot Training Real-time");
-	std::cout << "[Display Thread] Exit." << std::endl;
+	cv::destroyWindow("Pilot_" + camera_id);
+	std::cout << "[Display Thread] " << camera_id << " Exit." << std::endl;
 	return 0;
 }
 

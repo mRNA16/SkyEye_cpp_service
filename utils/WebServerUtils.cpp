@@ -24,14 +24,14 @@ namespace WebServerUtils {
     }
 
     int check_head(const httplib::Request& req, httplib::Response& res) {
-        if (!req.has_header("Content-Type") || req.get_header_value("Content-Type") != "application/json") {
+        /*if (!req.has_header("Content-Type") || req.get_header_value("Content-Type") != "application/json") {
             res.status = 400;
             json error;
             error["code"] = 400;
             error["msg"] = "Content-Type doesn't match 'application/json'";
             res.set_content(error.dump(), "application/json");
             return -1;
-        }
+        }*/
         return 0;
     }
 

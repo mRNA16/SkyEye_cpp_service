@@ -16,6 +16,13 @@
 #include "../feature/feature.hpp"
 #include "../feature/tridet.hpp"
 
+// libdatachannel
+#include <rtc/rtc.hpp>
+#include <memory>
+#include <map>
+#include <mutex>
+#include <future>
+
 using json = nlohmann::json;
 
 class PilotWebServer {
@@ -30,9 +37,18 @@ protected:
 	int distribute_GPU(int occupy, int design);
 	int cancel_GPU(int gpu_id, int occupy);
 	int launch_camera(const std::string& camera_id,const std::string& input_url);
-	int live(ThreadSafeQueue<cv::Mat>&);
+	int live(ThreadSafeQueue<cv::Mat>&, const std::string&);
 	int extract_features(HybridVideoQueue&,ThreadSafeQueue<std::vector<float>>&);
 	int tridet_predict(ThreadSafeQueue<std::vector<float>>&,float, const std::string&);
+
+	// WebRTC 相关
+	struct WebRTCSession {
+		std::shared_ptr<rtc::PeerConnection> pc;
+		std::function<void(const rtc::byte*, size_t)> send_video;
+	};
+	// camera_id -> sessions
+	std::mutex sessions_mtx;
+	std::map<std::string, std::vector<std::shared_ptr<WebRTCSession>>> webrtc_sessions;
 
 	httplib::Server server_;
 	ThreadSafeDict<std::string, bool> camera_thread_manager;

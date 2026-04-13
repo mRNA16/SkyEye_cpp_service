@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SkyEye | 智控动作检测核心</title>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg-base: #060913;
+            --panel-bg: rgba(16, 22, 42, 0.6);
+            --accent-blue: #00e5ff;
+            --accent-glow: rgba(0, 229, 255, 0.4);
+            --danger-red: #ff3366;
+            --text-main: #f0f4fc;
+            --text-dim: #8b9bb4;
+            --border-subtle: rgba(255, 255, 255, 0.08);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+            background: radial-gradient(circle at 50% 0%, #111a3a 0%, var(--bg-base) 60%);
+        }
+
+        /* 顶部导航标题 */
+        header {
+            padding: 24px 40px;
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: rgba(6, 9, 19, 0.8);
+            backdrop-filter: blur(12px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        header h1 {
+            font-size: 24px;
+            font-weight: 800;
+            letter-spacing: 2px;
+            background: linear-gradient(90deg, #fff, var(--accent-blue));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .server-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--text-dim);
+            box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+            transition: all 0.3s;
+        }
+
+        .status-dot.active {
+            background: var(--accent-blue);
+            box-shadow: 0 0 12px var(--accent-blue);
+        }
+
+        /* 核心布局 */
+        main {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 24px;
+            padding: 32px 40px;
+            flex: 1;
+        }
+
+        /* 玻璃态面板共同类 */
+        .glass-panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-subtle);
+            border-radius: 16px;
+            padding: 24px;
+            backdrop-filter: blur(20px);
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.2);
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .glass-panel h2 {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-dim);
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border-subtle);
+            font-weight: 600;
+        }
+
+        /* 操控台表单 */
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .form-group label {
+            font-size: 13px;
+            color: var(--text-dim);
+            font-weight: 600;
+        }
+
+        .form-group input {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 12px 16px;
+            color: white;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            outline: none;
+        }
+
+        .form-group input:focus {
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+        }
+
+        /* 按钮组 */
+        .btn {
+            padding: 14px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-launch {
+            background: var(--accent-blue);
+            color: #000;
+            box-shadow: 0 4px 15px var(--accent-glow);
+        }
+
+        .btn-launch:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 229, 255, 0.6);
+        }
+
+        .btn-offline {
+            background: transparent;
+            color: var(--danger-red);
+            border: 1px solid var(--danger-red);
+        }
+
+        .btn-offline:hover {
+            background: rgba(255, 51, 102, 0.1);
+        }
+
+        .btn-report {
+            background: rgba(255, 255, 255, 0.05);
+            color: white;
+            border: 1px solid var(--border-subtle);
+            margin-top: auto;
+        }
+
+        .btn-report:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+
+        /* 报告区域 */
+        .report-section {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto;
+            max-height: calc(100vh - 150px);
+            padding-right: 10px;
+        }
+
+        .report-section::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .report-section::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+
+        .empty-state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-dim);
+            font-size: 15px;
+            text-align: center;
+            gap: 16px;
+        }
+
+        .empty-state svg {
+            opacity: 0.2;
+            width: 64px;
+            height: 64px;
+        }
+
+        /* 动作卡片瀑布流 */
+        .action-card {
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(0, 229, 255, 0.1);
+            border-left: 4px solid var(--accent-blue);
+            border-radius: 8px;
+            padding: 16px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            animation: slideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            opacity: 0;
+            transform: translateY(20px);
+        }
+
+        .action-card:hover {
+            background: rgba(0, 229, 255, 0.05);
+            border-color: var(--accent-blue);
+        }
+
+        @keyframes slideIn {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .action-info {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .action-name {
+            font-size: 18px;
+            font-weight: 700;
+            color: white;
+        }
+
+        .action-time {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: var(--accent-blue);
+            background: rgba(0, 229, 255, 0.1);
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-block;
+            width: fit-content;
+        }
+
+        .action-score {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 6px;
+        }
+
+        .score-val {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 24px;
+            font-weight: 300;
+            color: white;
+        }
+
+        .score-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            letter-spacing: 1px;
+        }
+
+        /* Loading 效果 */
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 0.8s linear infinite;
+            display: none;
+        }
+
+        .btn.loading .spinner {
+            display: block;
+        }
+
+        .btn.loading span {
+            display: none;
+        }
+
+        @keyframes spin {
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* 系统消息日志 */
+        .log-box {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--text-dim);
+            background: rgba(0, 0, 0, 0.5);
+            padding: 12px;
+            border-radius: 6px;
+            min-height: 80px;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <h1>SKYEYE<span style="font-weight: 300; opacity: 0.5;"> // TRIDET DEPLOYMENT</span></h1>
+        <div class="server-status">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Awaiting Signal</span>
+        </div>
+    </header>
+
+    <main>
+        <!-- 左侧操作台 -->
+        <div class="glass-panel">
+            <h2>Command Console</h2>
+
+            <div class="form-group">
+                <label>CAMERA ID / 流追踪编号</label>
+                <input type="text" id="cameraId" value="CAM_TEST_001" placeholder="Enter Camera ID">
+            </div>
+
+            <div class="form-group">
+                <label>RTSP / VIDEO URL</label>
+                <input type="text" id="videoUrl" value="rtsp://localhost:8554/live" placeholder="rtsp://...">
+            </div>
+
+            <div style="display: flex; gap: 12px; margin-top: 10px;">
+                <button class="btn btn-launch" id="btnLaunch" style="flex: 2;" onclick="handleLaunch()">
+                    <div class="spinner"></div>
+                    <span>启 动 直 播 (Launch)</span>
+                </button>
+                <button class="btn btn-offline" id="btnOffline" style="flex: 1;" onclick="handleOffline()" disabled>
+                    <div class="spinner"></div>
+                    <span>推 出 (Stop)</span>
+                </button>
+            </div>
+
+            <div class="log-box" id="sysLog">
+                > System initialized. Ready to connect C++ Tridet Backend.
+            </div>
+
+            <button class="btn btn-report" id="btnReport" onclick="fetchReport()">
+                <div class="spinner"></div>
+                <span>获取最新动作检测结案报告</span>
+            </button>
+        </div>
+
+        <!-- 右侧大屏可视化 -->
+        <div class="report-section" id="reportSection">
+            <!-- 实时视频监控区 -->
+            <div id="videoContainer"
+                style="width:100%; aspect-ratio: 16/9; background:#000; border-radius:12px; overflow:hidden; border:1px solid var(--border-subtle); margin-bottom:20px; position:relative; display:none;">
+                <video id="liveVideo" autoplay playsinline
+                    style="width:100%; height:100%; object-fit: contain;"></video>
+                <div
+                    style="position:absolute; top:12px; left:12px; background:rgba(0,0,0,0.6); padding:4px 10px; border-radius:4px; font-size:12px; color:var(--accent-blue); backdrop-filter:blur(4px); display:flex; align-items:center; gap:6px;">
+                    <span
+                        style="width:8px; height:8px; background:var(--accent-blue); border-radius:50%; box-shadow:0 0 6px var(--accent-blue);"></span>
+                    LIVE WEBRTC
+                </div>
+            </div>
+
+            <div class="empty-state" id="emptyState">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+                </svg>
+                <div>尚未拉取报告<br><span style="font-size: 13px; opacity: 0.6; font-weight: 400;">请在截断直播并执行完 1D-NMS
+                        提纯后台指令后，点击获取报告查看高能时间轴</span></div>
+            </div>
+        </div>
+        </div>
+    </main>
+
+    <script>
+        // C++ API 后端地址 (如不在同一主机，请修改 IP)
+        const API_BASE = "http://127.0.0.1:8080";
+
+        const logBox = document.getElementById('sysLog');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const reportSection = document.getElementById('reportSection');
+        const liveVideo = document.getElementById('liveVideo');
+        const videoContainer = document.getElementById('videoContainer');
+        const emptyState = document.getElementById('emptyState');
+
+        let pc = null; // WebRTC PeerConnection
+
+        function appendLog(msg) {
+            const time = new Date().toLocaleTimeString();
+            logBox.innerHTML = `<div style="margin-bottom: 4px;">[${time}] ${msg}</div>` + logBox.innerHTML;
+        }
+
+        function setStatus(isActive, text) {
+            statusText.innerText = text;
+            if (isActive) {
+                statusDot.classList.add('active');
+            } else {
+                statusDot.classList.remove('active');
+            }
+        }
+
+        // 发起相机提取流请求
+        async function handleLaunch() {
+            const camId = document.getElementById('cameraId').value;
+            const url = document.getElementById('videoUrl').value;
+            const btn = document.getElementById('btnLaunch');
+
+            if (!camId || !url) return alert("Please specify Camera ID and URL!");
+
+            btn.classList.add('loading');
+            try {
+                const res = await fetch(`${API_BASE}/launch_camera`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify({ camera_id: camId, video_url: url })
+                });
+                const data = await res.json();
+                appendLog(`Launch Request: ${data.msg || (data.code === 200 ? 'Success' : 'Failed')}`);
+                if (data.code === 200) {
+                    setStatus(true, "STREAMING & EXTRACTING...");
+                    btn.disabled = true;
+                    document.getElementById('btnOffline').disabled = false;
+
+                    // 启动 WebRTC
+                    startWebRTC(camId);
+                }
+            } catch (e) {
+                appendLog(`<span style="color:var(--danger-red)">API Error: C++ 服务未响应 (${e.message})</span>`);
+            }
+            btn.classList.remove('loading');
+        }
+
+        // 停止相机并下线触发 NMS 一把梭报告
+        async function handleOffline() {
+            const camId = document.getElementById('cameraId').value;
+            const btn = document.getElementById('btnOffline');
+
+            btn.classList.add('loading');
+            try {
+                const res = await fetch(`${API_BASE}/offline_camera`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify({ camera_id: camId })
+                });
+                const data = await res.json();
+                appendLog(`Offline Request: ${data.msg}`);
+                if (data.code === 200) {
+                    setStatus(false, "OFFLINE / PROCESSING NMS");
+                    document.getElementById('btnLaunch').disabled = false;
+                    btn.disabled = true;
+                    stopWebRTC();
+                    appendLog(">>> 等待 C++ 后台单次极致超长推理并融合成结案 JSON ... 请稍候点击获取报告");
+                }
+            } catch (e) {
+                appendLog(`<span style="color:var(--danger-red)">API Error (${e.message})</span>`);
+            }
+            btn.classList.remove('loading');
+        }
+
+        // 拉取离线总结报告大盘
+        async function fetchReport() {
+            const camId = document.getElementById('cameraId').value;
+            const btn = document.getElementById('btnReport');
+
+            btn.classList.add('loading');
+            reportSection.innerHTML = `<div class="empty-state"><div class="spinner" style="display:block;"></div><div>拉取解码报告中...</div></div>`;
+
+            try {
+                const res = await fetch(`${API_BASE}/get_report`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify({ camera_id: camId })
+                });
+                const data = await res.json();
+
+                if (data.code === 200 && data.data && data.data.actions) {
+                    appendLog(`<span style="color:var(--accent-blue)">>>> JSON 捕获！共解析到 ${data.data.actions.length} 条过滤后航空动作！</span>`);
+                    setStatus(false, "REPORT GENERATED");
+                    renderCards(data.data.actions);
+                } else {
+                    appendLog(`<span style="color:var(--danger-red)">Result: ${data.msg || '暂无报告生成'}</span>`);
+                    reportSection.innerHTML = `<div class="empty-state">尚未出结果或报告未生成</div>`;
+                }
+            } catch (e) {
+                appendLog(`<span style="color:var(--danger-red)">Fetch Error: ${e.message}</span>`);
+                reportSection.innerHTML = `
+                <div class="empty-state" style="color: var(--danger-red)">
+                    您需要将 C++ 后端在 127.0.0.1:8080 跑起来并允许跨域请求方可调用真实 API。
+                </div>`;
+            }
+            btn.classList.remove('loading');
+        }
+
+        // WebRTC 核心逻辑
+        async function startWebRTC(camera_id) {
+            appendLog("Initializing WebRTC Handshake...");
+
+            pc = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+
+            pc.ontrack = (event) => {
+                appendLog("WebRTC Stream Received! Attaching to player...");
+                if (event.streams && event.streams[0]) {
+                    liveVideo.srcObject = event.streams[0];
+                } else {
+                    let inboundStream = new MediaStream();
+                    inboundStream.addTrack(event.track);
+                    liveVideo.srcObject = inboundStream;
+                }
+                videoContainer.style.display = 'block';
+                emptyState.style.display = 'none';
+                liveVideo.play().catch(() => { });
+            };
+
+            pc.oniceconnectionstatechange = () => {
+                appendLog(`ICE Connection State: <b>${pc.iceConnectionState}</b>`);
+            };
+
+            let sdpSent = false;
+            const sendOffer = async () => {
+                if (sdpSent) return;
+                sdpSent = true;
+                const offer = pc.localDescription;
+                appendLog("ICE Gathering Complete. Sending Offer to C++...");
+
+                try {
+                    const res = await fetch(`${API_BASE}/webrtc/offer`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'text/plain' },
+                        body: JSON.stringify({
+                            camera_id: camera_id,
+                            sdp: offer.sdp
+                        })
+                    });
+                    const data = await res.json();
+                    if (data.sdp) {
+                        appendLog("SDP Answer Received! Negotiating...");
+                        await pc.setRemoteDescription(new RTCSessionDescription({
+                            type: 'answer',
+                            sdp: data.sdp
+                        }));
+                    }
+                } catch (err) {
+                    appendLog(`<span style="color:var(--danger-red)">WebRTC Fetch Error: ${err.message}</span>`);
+                }
+            };
+
+            pc.onicegatheringstatechange = () => {
+                appendLog(`ICE Gathering: ${pc.iceGatheringState}`);
+                if (pc.iceGatheringState === 'complete') {
+                    sendOffer();
+                }
+            };
+
+            // 创建 ReceiveOnly 的收发器
+            pc.addTransceiver('video', { direction: 'recvonly' });
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            // 兜底逻辑：如果 10 秒内 ICE 没收集完，也尝试发送
+            setTimeout(() => {
+                if (!sdpSent) {
+                    appendLog("ICE Gathering Timeout, forcing offer send...");
+                    sendOffer();
+                }
+            }, 10000);
+        }
+
+        function stopWebRTC() {
+            if (pc) {
+                pc.close();
+                pc = null;
+            }
+            videoContainer.style.display = 'none';
+            emptyState.style.display = 'flex';
+        }
+
+        // 以瀑布流方式在前端卡片中渲染报告数据
+        function renderCards(actions) {
+            reportSection.innerHTML = '';
+            if (actions.length === 0) {
+                reportSection.innerHTML = `<div class="empty-state">本时段未检测到任何显式过阈值的控制室操作。</div>`;
+                return;
+            }
+
+            actions.forEach((act, index) => {
+                const delay = index * 0.08; // 产生递进动画渲染视觉
+                const startStr = Number(act.start).toFixed(2) + "s";
+                const endStr = Number(act.end).toFixed(2) + "s";
+                const scoreStr = Number(act.score).toFixed(3);
+
+                // 某些特别的危险动作标红处理
+                let isWarning = act.action.includes("SpeedBrakes") || act.action.includes("AlartLight");
+                let bderColor = isWarning ? 'var(--danger-red)' : 'var(--accent-blue)';
+
+                const card = document.createElement('div');
+                card.className = 'action-card';
+                card.style.animationDelay = `${delay}s`;
+                card.style.borderLeftColor = bderColor;
+
+                card.innerHTML = `
+                    <div class="action-info">
+                        <div class="action-name">${act.action}</div>
+                        <div class="action-time">Timeline: [ ${startStr} — ${endStr} ]</div>
+                    </div>
+                    <div class="action-score">
+                        <div class="score-val">${scoreStr}</div>
+                        <div class="score-label">Confidence</div>
+                    </div>
+                `;
+                reportSection.appendChild(card);
+            });
+        }
+    </script>
+</body>
+
+</html>
