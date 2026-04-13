@@ -14,7 +14,7 @@
 #include "thread_safe_queue.hpp"
 #include "hybrid_video_queue.hpp"
 #include "../feature/feature.hpp"
-#include "../feature/actionformer.hpp"
+#include "../feature/tridet.hpp"
 
 using json = nlohmann::json;
 
@@ -32,7 +32,7 @@ protected:
 	int launch_camera(const std::string& camera_id,const std::string& input_url);
 	int live(ThreadSafeQueue<cv::Mat>&);
 	int extract_features(HybridVideoQueue&,ThreadSafeQueue<std::vector<float>>&);
-	int actionformer_predict(ThreadSafeQueue<std::vector<float>>&,float);
+	int tridet_predict(ThreadSafeQueue<std::vector<float>>&,float);
 
 	httplib::Server server_;
 	ThreadSafeDict<std::string, bool> camera_thread_manager;
@@ -41,7 +41,7 @@ protected:
 	// I3D 特征提取模型
 	std::shared_ptr<I3D> i3d_model_;
 
-	// ActionFormer 时序动作检测模型
-	std::shared_ptr<ActionFormer> actionformer_model_;
+	// Tridet 时序动作检测模型
+	std::shared_ptr<Tridet> tridet_model_;
 };
 

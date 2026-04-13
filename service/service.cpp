@@ -27,14 +27,14 @@ int PilotWebServer::loadModels() {
 	}
 	std::cout << "I3D Model initialized successfully." << std::endl;
 
-	// Load actionformer onnx
-	std::cout << "Loading ActionFormer Model from: " << ACTIONFORMER_MODEL_PATH << std::endl;
-	actionformer_model_ = std::make_shared<ActionFormer>();
-	if (actionformer_model_->Init(ACTIONFORMER_MODEL_PATH, 0, NUM_CLASSES) != 0) {
-		std::cerr << "Failed to initialize ActionFormer model!" << std::endl;
+	// Load Tridet onnx
+	std::cout << "Loading Tridet Model from: " << TRIDET_MODEL_PATH << std::endl;
+	tridet_model_ = std::make_shared<Tridet>();
+	if (tridet_model_->Init(TRIDET_MODEL_PATH, 0, NUM_CLASSES) != 0) {
+		std::cerr << "Failed to initialize Tridet model!" << std::endl;
 		return -1;
 	}
-	std::cout << "ActionFormer Model initialized successfully." << std::endl;
+	std::cout << "Tridet Model initialized successfully." << std::endl;
 
 	return 0;
 }
@@ -145,7 +145,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	// 启动消费者线程
 	std::thread thread_live(&PilotWebServer::live, this, std::ref(display_queue));
 	std::thread thread_extract(&PilotWebServer::extract_features, this, std::ref(frame_queue), std::ref(feature_queue));
-	std::thread thread_predict(&PilotWebServer::actionformer_predict, this, std::ref(feature_queue), static_cast<float>(fps_));
+	std::thread thread_predict(&PilotWebServer::tridet_predict, this, std::ref(feature_queue), static_cast<float>(fps_));
 
 	// 生产者主循环
 	while (camera_thread_manager.get(camera_id)) {
@@ -193,7 +193,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	// 3. 等待特征提取线程结束，这个过程慢，磁盘中挤压视频帧很多
 	if (thread_extract.joinable()) thread_extract.join();
 	
-	// 4. 特征提取宣告结束，ActionFormer消耗完所有的特征后结束
+	// 4. 特征提取宣告结束，Tridet 消耗完所有的特征后结束
 	feature_queue.stop();
 	if (thread_predict.joinable()) thread_predict.join();
 
@@ -243,27 +243,35 @@ int PilotWebServer::extract_features(HybridVideoQueue& frame_queue,ThreadSafeQue
 	return 0;
 }
 
-int PilotWebServer::actionformer_predict(ThreadSafeQueue<std::vector<float>>& feature_queue, float fps) {
-	// ActionFormer消费者处理
+// 定义对应的真实语义：从 0 背景，再到 1-16 代表具体的控制台动作
+const std::vector<std::string> ACTION_NAMES = {
+	"Background", "Yoke", "ThrottleLever", "LandingGear", "SpeedBrakes", "Flap",
+	"Computer", "TrimWheel", "EngineSwitch", "EngineModeSel", "RudTrim",
+	"EFISControl", "SpeedSel", "HeadingSel", "AltitudeSel", "VerticalSpeedSel", "AutoPilot"
+};
+
+int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_queue, float fps) {
+	// Tridet消费者处理
 	std::vector<float> features;
 
 	while (feature_queue.wait_and_pop(features)) {
-		if (!features.empty() && this->actionformer_model_) {
-			std::vector<ActionSegment> actions = actionformer_model_->Run(features, static_cast<float>(fps), CHUNK_SIZE);
+		if (!features.empty() && this->tridet_model_) {
+			std::vector<ActionSegment> actions = tridet_model_->Run(features, static_cast<float>(fps), CHUNK_SIZE);
 			std::string predicted_action = "Background";
 			float max_score = 0.0f;
 			for (const auto& action : actions) {
 				if (action.score > max_score) {
 					max_score = action.score;
-					predicted_action = "[" + std::to_string(action.start_time).substr(0,4)+"—" + std::to_string(action.end_time).substr(0, 4) + "]"
-						 + "Action " + std::to_string(action.label) + " (" + std::to_string(action.score).substr(0, 4) + ")";
+					std::string act_name = (action.label >= 0 && action.label < ACTION_NAMES.size()) ? ACTION_NAMES[action.label] : "Action " + std::to_string(action.label);
+					predicted_action = "[" + std::to_string(action.start_time).substr(0,4)+"—" + std::to_string(action.end_time).substr(0, 4) + "] "
+						 + act_name + " (" + std::to_string(action.score).substr(0, 4) + ")";
 				}
 			}
-			std::cout << "[ActionFormer Thread] Predicted: " << predicted_action
+			std::cout << "[Tridet Thread] Predicted: " << predicted_action
 				<< " | Remaining feature queue size: " << feature_queue.size() << std::endl;
 		}
 	}
-	std::cout << "[ActionFormer Thread] Exit." << std::endl;
+	std::cout << "[Tridet Thread] Exit." << std::endl;
 	return 0;
 }
 
