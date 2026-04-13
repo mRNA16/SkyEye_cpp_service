@@ -32,7 +32,7 @@ protected:
 	int launch_camera(const std::string& camera_id,const std::string& input_url);
 	int live(ThreadSafeQueue<cv::Mat>&);
 	int extract_features(HybridVideoQueue&,ThreadSafeQueue<std::vector<float>>&);
-	int tridet_predict(ThreadSafeQueue<std::vector<float>>&,float);
+	int tridet_predict(ThreadSafeQueue<std::vector<float>>&,float, const std::string&);
 
 	httplib::Server server_;
 	ThreadSafeDict<std::string, bool> camera_thread_manager;

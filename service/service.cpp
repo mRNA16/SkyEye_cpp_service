@@ -98,6 +98,29 @@ int PilotWebServer::set_camera_interface() {
 		res.set_content(response.dump(), "application/json");
 	});
 
+	server_.Post("/get_report", [this](const httplib::Request& req, httplib::Response& res) {
+		if (WebServerUtils::check_head(req, res)) return;
+		std::vector<std::string> meta_fields = { "camera_id" };
+		if (WebServerUtils::check_field(req, res, meta_fields)) return;
+		json request = json::parse(req.body);
+		std::string camera_id = request["camera_id"];
+
+		json response;
+		std::string report_file = "report_" + camera_id + ".json";
+		std::ifstream ifs(report_file);
+		if (ifs.is_open()) {
+			json report_data;
+			ifs >> report_data;
+			response["code"] = 200;
+			response["data"] = report_data;
+		} else {
+			response["code"] = 404;
+			response["msg"] = "Report not found or the live stream is still ongoing.";
+		}
+		res.status = 200;
+		res.set_content(response.dump(), "application/json");
+	});
+
 	return 0;
 }
 
@@ -145,7 +168,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	// 启动消费者线程
 	std::thread thread_live(&PilotWebServer::live, this, std::ref(display_queue));
 	std::thread thread_extract(&PilotWebServer::extract_features, this, std::ref(frame_queue), std::ref(feature_queue));
-	std::thread thread_predict(&PilotWebServer::tridet_predict, this, std::ref(feature_queue), static_cast<float>(fps_));
+	std::thread thread_predict(&PilotWebServer::tridet_predict, this, std::ref(feature_queue), static_cast<float>(fps_), camera_id);
 
 	// 生产者主循环
 	while (camera_thread_manager.get(camera_id)) {
@@ -250,28 +273,64 @@ const std::vector<std::string> ACTION_NAMES = {
 	"EFISControl", "SpeedSel", "HeadingSel", "AltitudeSel", "VerticalSpeedSel", "AutoPilot"
 };
 
-int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_queue, float fps) {
+int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_queue, float fps, const std::string& camera_id) {
 	// Tridet消费者处理
 	std::vector<float> features;
+	std::vector<ActionSegment> global_segments;
 
 	while (feature_queue.wait_and_pop(features)) {
 		if (!features.empty() && this->tridet_model_) {
 			std::vector<ActionSegment> actions = tridet_model_->Run(features, static_cast<float>(fps), CHUNK_SIZE);
-			std::string predicted_action = "Background";
-			float max_score = 0.0f;
 			for (const auto& action : actions) {
-				if (action.score > max_score) {
-					max_score = action.score;
-					std::string act_name = (action.label >= 0 && action.label < ACTION_NAMES.size()) ? ACTION_NAMES[action.label] : "Action " + std::to_string(action.label);
-					predicted_action = "[" + std::to_string(action.start_time).substr(0,4)+"—" + std::to_string(action.end_time).substr(0, 4) + "] "
-						 + act_name + " (" + std::to_string(action.score).substr(0, 4) + ")";
+				// 收集每一段由滑窗内预测出的有效结果用于最终全时段去重
+				if(action.score > 0.05f) {
+					global_segments.push_back(action);
 				}
 			}
-			std::cout << "[Tridet Thread] Predicted: " << predicted_action
-				<< " | Remaining feature queue size: " << feature_queue.size() << std::endl;
 		}
 	}
-	std::cout << "[Tridet Thread] Exit." << std::endl;
+	
+	std::cout << "[Tridet Thread] Stream finished. Generating final report..." << std::endl;
+	
+	// 在全部结束后使用全局 1D-IoU NMS 清理同一动作被随着不同窗口预测产生的多重叠碎片
+	std::sort(global_segments.begin(), global_segments.end(), [](const ActionSegment& a, const ActionSegment& b){
+		return a.score > b.score;
+	});
+	std::vector<ActionSegment> nms_results;
+	for (auto& seg : global_segments) {
+		bool drop = false;
+		for (auto& res : nms_results) {
+			if (seg.label == res.label) {
+				float inter_start = std::max(seg.start_time, res.start_time);
+				float inter_end = std::min(seg.end_time, res.end_time);
+				float inter = std::max(0.0f, inter_end - inter_start);
+				float uni = (seg.end_time - seg.start_time) + (res.end_time - res.start_time) - inter;
+				if (uni > 0 && (inter / uni) > 0.2f) { // IoU 阈值控制融合
+					drop = true; break;
+				}
+			}
+		}
+		if (!drop) nms_results.push_back(seg);
+	}
+	
+	// 并行保存为结果并允许被提取
+	std::sort(nms_results.begin(), nms_results.end(), [](const ActionSegment& a, const ActionSegment& b){ return a.start_time < b.start_time; });
+	json report;
+	report["camera_id"] = camera_id;
+	report["summary"] = "Action Detection Report";
+	report["actions"] = json::array();
+	for (auto& seg : nms_results) {
+		json item;
+		item["start"] = seg.start_time;
+		item["end"] = seg.end_time;
+		item["score"] = seg.score;
+		item["action"] = (seg.label >= 0 && seg.label < ACTION_NAMES.size()) ? ACTION_NAMES[seg.label] : "Action " + std::to_string(seg.label);
+		report["actions"].push_back(item);
+	}
+	std::ofstream ofs("report_" + camera_id + ".json");
+	ofs << report.dump(4);
+	
+	std::cout << "[Tridet Thread] Report saved to report_" << camera_id << ".json. Thread Exit." << std::endl;
 	return 0;
 }
 
