@@ -98,10 +98,10 @@ void I3D::Preprocess(const std::vector<cv::Mat>& frames, std::vector<float>& out
             for (int w = 0; w < W; ++w) {
                 cv::Vec3b pixel = resized.at<cv::Vec3b>(h, w);
                 
-                // 归一化: (value / 255.0) * 2.0 - 1.0
-                float r = (static_cast<float>(pixel[0]) / 255.0f) * 2.0f - 1.0f;
-                float g = (static_cast<float>(pixel[1]) / 255.0f) * 2.0f - 1.0f;
-                float b = (static_cast<float>(pixel[2]) / 255.0f) * 2.0f - 1.0f;
+                // 归一化: ImageNet (value / 255.0 - mean) / std 
+                float r = (static_cast<float>(pixel[0]) / 255.0f - 0.485f) / 0.229f;
+                float g = (static_cast<float>(pixel[1]) / 255.0f - 0.456f) / 0.224f;
+                float b = (static_cast<float>(pixel[2]) / 255.0f - 0.406f) / 0.225f;
 
                 // C=0: R, C=1: G, C=2: B
                 output_data[0 * T * H * W + t * H * W + h * W + w] = r;
