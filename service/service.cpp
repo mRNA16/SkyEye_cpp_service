@@ -290,7 +290,7 @@ int PilotWebServer::set_camera_interface() {
 		});
 
 		constexpr uint32_t SSRC = 42;
-		constexpr uint8_t TARGET_PT = 96; // 劫持默认 PT
+		constexpr uint8_t TARGET_PT = 103; // 使用浏览器已声明支持的 H264 PT
 		auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
     		SSRC, "video", TARGET_PT, rtc::H264RtpPacketizer::ClockRate
 		);
@@ -391,43 +391,31 @@ int PilotWebServer::set_camera_interface() {
 		if (gather_future.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
 			std::string answer_sdp = gather_future.get();
 
-			// 增强型 SDP 处理（劫持与重定义策略）：
+			// 增强型 SDP 处理 (PT 103 协商策略)
 			{
 				std::string& sdp = answer_sdp;
-				// 1. 修正 setup 角色
+				// 1. 修正 setup 角色为 active (RFC 标准 Answer 必须返回明确角色)
 				size_t setup_pos = sdp.find("a=setup:actpass");
 				if (setup_pos != std::string::npos) sdp.replace(setup_pos, 15, "a=setup:active");
 
-				// 2. 劫持 rtpmap:96（将 VP8 强制重写为 H264）
-				size_t rtmap_pos = sdp.find("a=rtpmap:96");
-				if (rtmap_pos != std::string::npos) {
-					size_t line_end = sdp.find("\n", rtmap_pos);
-					if (line_end != std::string::npos) {
-						sdp.replace(rtmap_pos, line_end - rtmap_pos, "a=rtpmap:96 H264/90000\r");
-					}
-				}
-
-				// 3. 注入或替换 fmtp:96 关键属性
-				std::string fmtp_line = "a=fmtp:96 packetization-mode=1;profile-level-id=42c01f\r";
-				size_t fmtp_pos = sdp.find("a=fmtp:96");
+				// 2. 强制确保 H.264 的关键参数对齐（注意严格使用 \r\n）
+				// packetization-mode=1 必须启用，否则浏览器无法重组 FU-A 分片包
+				std::string h264_fmtp = "a=fmtp:103 packetization-mode=1;profile-level-id=42c01f\r\n";
+				size_t fmtp_pos = sdp.find("a=fmtp:103");
 				if (fmtp_pos != std::string::npos) {
 					size_t line_end = sdp.find("\n", fmtp_pos);
-					if (line_end != std::string::npos) {
-						sdp.replace(fmtp_pos, line_end - fmtp_pos, fmtp_line);
-					}
+					sdp.replace(fmtp_pos, line_end - fmtp_pos + 1, h264_fmtp);
 				} else {
 					size_t vpos = sdp.find("m=video");
 					if (vpos != std::string::npos) {
 						size_t nl = sdp.find("\n", vpos);
-						if (nl != std::string::npos) sdp.insert(nl + 1, fmtp_line + "\n");
+						sdp.insert(nl + 1, h264_fmtp);
 					}
 				}
 
-				// 4. 关键修复：注入 SSRC 声明
-				// 告诉浏览器：SSRC 42 对应这个视频轨道的媒体流
+				// 3. 注入 SSRC 声明 (确保 RTP 发包器 SSRC=42 与 Track 强关联)
 				std::string ssrc_info = "a=ssrc:42 cname:skyeye-video\r\n"
 				                        "a=ssrc:42 msid:stream1 track1\r\n"
-				                        "a=ssrc:42 mslabel:stream1\r\n"
 				                        "a=ssrc:42 label:track1\r\n";
 				size_t video_m = sdp.find("m=video");
 				if (video_m != std::string::npos) {
@@ -442,7 +430,7 @@ int PilotWebServer::set_camera_interface() {
 			response["sdp"]  = answer_sdp;
 			std::cout << "--- [DEBUG] Server Answer SDP ---\n" << answer_sdp << "\n-------------------------------" << std::endl;
 			std::cout << "[WebRTC] ICE Gathering complete. Sending Answer for " << camera_id << std::endl;
-			res.set_content(response.dump(), "application/json");
+			res.set_content(response.dump(), "text/plain");
 		} else {
 			std::cerr << "[WebRTC] ICE Gathering TIMEOUT for " << camera_id << std::endl;
 			res.status = 500;
