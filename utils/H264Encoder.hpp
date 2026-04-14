@@ -26,10 +26,11 @@ public:
     bool Init(int width, int height, int fps, int bitrate = 1500000);
 
     // 编码一帧并通过回调返回 Annex-B 数据
-    void Encode(const cv::Mat& mat, std::function<void(const uint8_t*, size_t)> callback);
+    // pts 为帧的原始序号，对应 RTP 时间戳计算
+    void Encode(const cv::Mat& mat, std::function<void(const uint8_t* data, size_t size, int64_t pts)> callback);
 
-    // 临时调试：打印最近一次编码输出信息
-    void DumpLastEncodeDebug() const;
+    // 强制下一帧为关键帧（用于响应 WebRTC 的 PLI 请求）
+    void ForceKeyframe();
 
 private:
     void Cleanup();

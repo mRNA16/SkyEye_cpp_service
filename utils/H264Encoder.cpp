@@ -60,15 +60,17 @@ bool H264Encoder::Init(int width, int height, int fps, int bitrate) {
         av_opt_set(codec_ctx->priv_data, "tune",        "zerolatency", 0);
         // repeat-headers=1  每个 IDR 帧前都带 SPS/PPS
         // annexb=1          强制 Annex-B start-code 输出
-        // sliced-threads=0  避免分片线程影响 WebRTC 帧完整性
+        // sliced-threads=0  禁用切片线程以防在低比特率下产生过多 NALU
+        // rc-lookahead=0    强制零帧前瞻，配合 zerolatency
         av_opt_set(codec_ctx->priv_data, "x264-params",
-                   "repeat-headers=1:annexb=1:sliced-threads=0", 0);
+                   "repeat-headers=1:annexb=1:sliced-threads=0:rc-lookahead=0", 0);
         av_opt_set(codec_ctx->priv_data, "profile", "baseline", 0);
     } else if (cname.find("nvenc") != std::string::npos) {
         av_opt_set(codec_ctx->priv_data, "preset",          "p1",  0); // 最快
         av_opt_set(codec_ctx->priv_data, "tune",            "ull", 0); // 超低延迟
         av_opt_set(codec_ctx->priv_data, "annexb",          "1",   0); // 强制 Annex-B
         av_opt_set(codec_ctx->priv_data, "repeat-headers",  "1",   0); // IDR 带参数集
+        av_opt_set(codec_ctx->priv_data, "rc-lookahead",    "0",   0);
     }
     // h264_mf 没有 annexb 私有选项，依赖后续 BSF 做格式转换
 
@@ -125,7 +127,7 @@ bool H264Encoder::Init(int width, int height, int fps, int bitrate) {
     return true;
 }
 
-void H264Encoder::Encode(const cv::Mat& mat, std::function<void(const uint8_t*, size_t)> callback) {
+void H264Encoder::Encode(const cv::Mat& mat, std::function<void(const uint8_t* data, size_t size, int64_t pts)> callback) {
     if (!codec_ctx || !sws_ctx || mat.empty()) return;
 
     last_encode_in_size_ = static_cast<size_t>(mat.total() * mat.elemSize());
@@ -154,7 +156,7 @@ void H264Encoder::Encode(const cv::Mat& mat, std::function<void(const uint8_t*, 
                 if (bsf_pkt) {
                     while (av_bsf_receive_packet(bsf_ctx, bsf_pkt) >= 0) {
                         last_encode_out_size_ += static_cast<size_t>(bsf_pkt->size);
-                        callback(bsf_pkt->data, static_cast<size_t>(bsf_pkt->size));
+                        callback(bsf_pkt->data, static_cast<size_t>(bsf_pkt->size), bsf_pkt->pts);
                         av_packet_unref(bsf_pkt);
                     }
                     av_packet_free(&bsf_pkt);
@@ -162,7 +164,7 @@ void H264Encoder::Encode(const cv::Mat& mat, std::function<void(const uint8_t*, 
             }
         } else {
             last_encode_out_size_ += static_cast<size_t>(pkt->size);
-            callback(pkt->data, static_cast<size_t>(pkt->size));
+            callback(pkt->data, static_cast<size_t>(pkt->size), pkt->pts);
             av_packet_unref(pkt);
         }
     }
@@ -176,8 +178,9 @@ void H264Encoder::Encode(const cv::Mat& mat, std::function<void(const uint8_t*, 
     }
 }
 
-void H264Encoder::DumpLastEncodeDebug() const {
-    std::cout << "[H264Encoder] last encode: in=" << last_encode_in_size_
-              << " out=" << last_encode_out_size_
-              << " packets=" << last_encode_packets_ << std::endl;
+void H264Encoder::ForceKeyframe() {
+    // 标记下一帧为 I 帧，确保客户端能立即获得画面
+    if (frame) {
+        frame->pict_type = AV_PICTURE_TYPE_I;
+    }
 }

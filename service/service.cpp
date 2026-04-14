@@ -26,6 +26,31 @@ int PilotWebServer::boot() {
 	server_.Options("/offline_camera", cors_options_handler);
 	server_.Options("/get_report", cors_options_handler);
 	server_.Options("/webrtc/offer", cors_options_handler);
+
+	// 解决 file:// 协议下的 WebRTC 安全限制：直接通过 http://localhost:8080 访问前端
+	server_.Get("/", [this](const httplib::Request& req, httplib::Response& res) {
+		std::vector<std::string> search_paths = {
+			"client/index.html",
+			"../client/index.html",
+			"../../client/index.html",
+			"../../../client/index.html"
+		};
+		
+		std::ifstream ifs;
+		for (const auto& path : search_paths) {
+			ifs.open(path);
+			if (ifs.is_open()) break;
+		}
+
+		if (ifs.is_open()) {
+			std::stringstream ss;
+			ss << ifs.rdbuf();
+			res.set_content(ss.str(), "text/html; charset=utf-8");
+		} else {
+			res.status = 404;
+			res.set_content("<h3>SkyEye Error: index.html not found in any search paths!</h3>", "text/html");
+		}
+	});
 	
 	// 对所有成功进入的常规请求（POST）最后带上跨域许可凭证
 	server_.set_post_routing_handler([](const auto& req, auto& res) {
@@ -225,9 +250,10 @@ int PilotWebServer::set_camera_interface() {
 		auto track_future   = track_promise->get_future();
 		auto track_received = std::make_shared<std::atomic<bool>>(false);
 
-		pc->onTrack([camera_id, track_promise, track_received](std::shared_ptr<rtc::Track> track) {
+		pc->onTrack([this, camera_id, track_promise, track_received](std::shared_ptr<rtc::Track> track) {
 			std::cout << "[WebRTC] onTrack fired for camera " << camera_id
 			          << ", mid=" << track->mid() << std::endl;
+
 			if (!track_received->exchange(true)) {
 				track_promise->set_value(track);
 			}
@@ -254,35 +280,90 @@ int PilotWebServer::set_camera_interface() {
 		}
 
 		// === Step 3: 在 onTrack 得到的 Track 上挂载 RTP 打包器 ===
-		local_track->onOpen([camera_id]() {
+		local_track->onOpen([this, camera_id]() {
 			std::cout << "🟢 [WebRTC Track Open] Camera " << camera_id << " is now ready for streaming!" << std::endl;
+			// 关键修复：Track 打开时立即请求一个关键帧，确保新接入的用户能立即看到画面
+			this->keyframe_requests.set(camera_id, true);
 		});
 		local_track->onClosed([camera_id]() {
 			std::cout << "[WebRTC] Track Closed for camera " << camera_id << std::endl;
 		});
 
 		constexpr uint32_t SSRC = 42;
+		constexpr uint8_t TARGET_PT = 96; // 劫持默认 PT
 		auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
-			SSRC, "video", 96, rtc::H264RtpPacketizer::ClockRate
+    		SSRC, "video", TARGET_PT, rtc::H264RtpPacketizer::ClockRate
 		);
+
+		// 打包器构造函数的第三个参数是 MTU 大小（1200），显式限制以防公网丢包
 		auto packetizer    = std::make_shared<rtc::H264RtpPacketizer>(
-			rtc::H264RtpPacketizer::Separator::StartSequence, rtpConfig
+			rtc::H264RtpPacketizer::Separator::StartSequence, rtpConfig, 1200
 		);
+
 		auto srReporter    = std::make_shared<rtc::RtcpSrReporter>(rtpConfig);
 		auto nackResponder = std::make_shared<rtc::RtcpNackResponder>();
+		
+		// 使用 PliHandler 捕获浏览器的关键帧请求（PLI 信号）
+		auto pliHandler = std::make_shared<rtc::PliHandler>([this, camera_id]() {
+			std::cout << "📢 [WebRTC PLI] Receiver requested replacement keyframe for " << camera_id << std::endl;
+			this->keyframe_requests.set(camera_id, true);
+		});
+
 		packetizer->addToChain(srReporter);
 		srReporter->addToChain(nackResponder);
+		nackResponder->addToChain(pliHandler); // 挂载到处理链条
+		
 		local_track->setMediaHandler(packetizer);
 
 		// 填充 session
 		session->track      = local_track;
 		session->packetizer = packetizer;
 		constexpr int ENCODE_FPS = 15;
-		session->send_video = [local_track, rtpConfig, camera_id, ENCODE_FPS](const rtc::byte* data, size_t size) {
+		session->send_video = [local_track, rtpConfig, camera_id, ENCODE_FPS](const rtc::byte* data, size_t size, int64_t pts) {
 			try {
-				if (local_track->isOpen()) {
-					rtpConfig->timestamp += rtc::H264RtpPacketizer::ClockRate / ENCODE_FPS;
-					local_track->send(rtc::binary(data, data + size));
+				// 每一帧的所有 NALU 共享相同的 90kHz RTP 时间戳
+				rtpConfig->timestamp = 160000 + static_cast<uint32_t>(pts * (90000 / ENCODE_FPS));
+
+				// 关键修复：手动拆解 Annex-B 里的多个 NALU。
+				// FFmpeg 经常将 SPS/PPS/IDR 粘在一起，导致打包器误将其识别为一个巨大的 SPS。
+				const uint8_t* ptr = reinterpret_cast<const uint8_t*>(data);
+				const uint8_t* end = ptr + size;
+				const uint8_t* nalu_start = nullptr;
+
+				while (ptr < end) {
+					// 寻找 NALU 起始码 (00 00 01 或 00 00 00 01)
+					bool is_start_code = false;
+					int skip = 0;
+					if (ptr + 4 <= end && ptr[0] == 0 && ptr[1] == 0 && ptr[2] == 0 && ptr[3] == 1) {
+						is_start_code = true; skip = 4;
+					} else if (ptr + 3 <= end && ptr[0] == 0 && ptr[1] == 0 && ptr[2] == 1) {
+						is_start_code = true; skip = 3;
+					}
+
+					if (is_start_code) {
+						if (nalu_start) {
+							// 发送上一个找到的完整 NALU，显式转换回 rtc::byte* 指针以匹配 rtc::binary 的迭代器构造
+							local_track->send(rtc::binary(reinterpret_cast<const rtc::byte*>(nalu_start), reinterpret_cast<const rtc::byte*>(ptr)));
+						}
+						nalu_start = ptr;
+						ptr += skip;
+					} else {
+						ptr++;
+					}
+				}
+				
+				// 发送 buffer 中的最后一个 NALU
+				if (nalu_start) {
+					// 调试日志：探测最后一个 NALU 类型
+					uint8_t nalu_type = 0;
+					if (nalu_start[2] == 1) nalu_type = nalu_start[3] & 0x1F;
+					else if (nalu_start[3] == 1) nalu_type = nalu_start[4] & 0x1F;
+
+					if (nalu_type == 7 || nalu_type == 8 || nalu_type == 5 || pts % 200 == 0) {
+						std::cout << "🔍 [WebRTC Send] " << camera_id << " Type=" << (int)nalu_type 
+						          << " Size=" << (end - nalu_start) << " TS=" << rtpConfig->timestamp << std::endl;
+					}
+					local_track->send(rtc::binary(reinterpret_cast<const rtc::byte*>(nalu_start), reinterpret_cast<const rtc::byte*>(end)));
 				}
 			} catch (const std::exception& e) {
 				std::cerr << "🔴 [WebRTC Send Error] Camera " << camera_id << ": " << e.what() << std::endl;
@@ -291,6 +372,7 @@ int PilotWebServer::set_camera_interface() {
 
 		// === Step 4 & 5: 生成 answer 并收集 ICE 候选 ===
 		try {
+			std::cout << "--- [DEBUG] Browser Offer SDP ---\n" << sdp << "\n-------------------------------" << std::endl;
 			pc->setLocalDescription();
 			pc->gatherLocalCandidates();
 		} catch (const std::exception& e) {
@@ -309,22 +391,56 @@ int PilotWebServer::set_camera_interface() {
 		if (gather_future.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
 			std::string answer_sdp = gather_future.get();
 
-			// RFC 规定：answer 中 a=setup 必须是 active 或 passive，不能是 actpass。
-			// libdatachannel 某些版本在作为 answerer 时仍输出 actpass，浏览器会拒绝。
-			// 这里将 actpass 替换为 active（服务端主动发起 DTLS 握手）。
+			// 增强型 SDP 处理（劫持与重定义策略）：
 			{
-				const std::string from = "a=setup:actpass";
-				const std::string to   = "a=setup:active";
-				size_t pos = 0;
-				while ((pos = answer_sdp.find(from, pos)) != std::string::npos) {
-					answer_sdp.replace(pos, from.size(), to);
-					pos += to.size();
+				std::string& sdp = answer_sdp;
+				// 1. 修正 setup 角色
+				size_t setup_pos = sdp.find("a=setup:actpass");
+				if (setup_pos != std::string::npos) sdp.replace(setup_pos, 15, "a=setup:active");
+
+				// 2. 劫持 rtpmap:96（将 VP8 强制重写为 H264）
+				size_t rtmap_pos = sdp.find("a=rtpmap:96");
+				if (rtmap_pos != std::string::npos) {
+					size_t line_end = sdp.find("\n", rtmap_pos);
+					if (line_end != std::string::npos) {
+						sdp.replace(rtmap_pos, line_end - rtmap_pos, "a=rtpmap:96 H264/90000\r");
+					}
+				}
+
+				// 3. 注入或替换 fmtp:96 关键属性
+				std::string fmtp_line = "a=fmtp:96 packetization-mode=1;profile-level-id=42c01f\r";
+				size_t fmtp_pos = sdp.find("a=fmtp:96");
+				if (fmtp_pos != std::string::npos) {
+					size_t line_end = sdp.find("\n", fmtp_pos);
+					if (line_end != std::string::npos) {
+						sdp.replace(fmtp_pos, line_end - fmtp_pos, fmtp_line);
+					}
+				} else {
+					size_t vpos = sdp.find("m=video");
+					if (vpos != std::string::npos) {
+						size_t nl = sdp.find("\n", vpos);
+						if (nl != std::string::npos) sdp.insert(nl + 1, fmtp_line + "\n");
+					}
+				}
+
+				// 4. 关键修复：注入 SSRC 声明
+				// 告诉浏览器：SSRC 42 对应这个视频轨道的媒体流
+				std::string ssrc_info = "a=ssrc:42 cname:skyeye-video\r\n"
+				                        "a=ssrc:42 msid:stream1 track1\r\n"
+				                        "a=ssrc:42 mslabel:stream1\r\n"
+				                        "a=ssrc:42 label:track1\r\n";
+				size_t video_m = sdp.find("m=video");
+				if (video_m != std::string::npos) {
+					size_t next_m = sdp.find("m=", video_m + 8);
+					if (next_m == std::string::npos) next_m = sdp.size();
+					sdp.insert(next_m, ssrc_info);
 				}
 			}
 
 			json response;
 			response["type"] = "answer";
 			response["sdp"]  = answer_sdp;
+			std::cout << "--- [DEBUG] Server Answer SDP ---\n" << answer_sdp << "\n-------------------------------" << std::endl;
 			std::cout << "[WebRTC] ICE Gathering complete. Sending Answer for " << camera_id << std::endl;
 			res.set_content(response.dump(), "application/json");
 		} else {
@@ -488,7 +604,7 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 
 			// 懒初始化编码器（首次有客户端接入才启动）
 			if (!encoder_init) {
-				encoder_init = encoder.Init(ENCODE_W, ENCODE_H, ENCODE_FPS, 3000000);
+				encoder_init = encoder.Init(ENCODE_W, ENCODE_H, ENCODE_FPS, 2000000);
 				if (!encoder_init) {
 					std::cerr << "[EncodeThread] H264Encoder Init failed!" << std::endl;
 					continue;
@@ -500,29 +616,30 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 			cv::Mat small_frame;
 			cv::resize(enc_frame, small_frame, cv::Size(ENCODE_W, ENCODE_H));
 
-			encoder.Encode(small_frame, [&sessions_snapshot](const uint8_t* data, size_t size) {
+			// 检查是否有 PLI 请求，强制产生一个关键帧
+			if (this->keyframe_requests.has(camera_id) && this->keyframe_requests.get(camera_id)) {
+				encoder.ForceKeyframe();
+				this->keyframe_requests.set(camera_id, false); // 重置标志
+			}
+
+			encoder.Encode(small_frame, [&sessions_snapshot](const uint8_t* data, size_t size, int64_t pts) {
 				static std::atomic<int> packet_idx{ 0 };
 				int idx = packet_idx.fetch_add(1);
 				// 前 8 个 packet 打印头部字节，用于确认 Annex-B 格式
 				if (idx < 8) {
 					std::ostringstream oss;
-					oss << "[H264] pkt#" << idx << " size=" << size << " head=";
+					oss << "[H264] pkt#" << idx << " pts=" << pts << " size=" << size << " head=";
 					for (size_t i = 0; i < std::min<size_t>(size, 8); ++i) {
 						oss << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << static_cast<int>(data[i]) << ' ';
 					}
 					std::cout << oss.str() << std::endl;
 				}
 				for (auto& session : sessions_snapshot) {
-					// 关键修复：移除 isOpen() 硬门槛
-					// libdatachannel 中 PeerConnection::Connected != Track::Open，
-					// isOpen() 可能长期为 false 即使连接已建立，导致所有帧被丢弃。
-					// 改为只要 track 存在且 send_video 可用就直接尝试发送，
-					// 内部 send_video 已有 try/catch 保护，不会崩溃。
 					if (session->track && session->send_video) {
 						try {
-							session->send_video(reinterpret_cast<const rtc::byte*>(data), size);
+							session->send_video(reinterpret_cast<const rtc::byte*>(data), size, pts);
 							if (idx < 4) {
-								std::cout << "[WebRTC] send_video OK pkt#" << idx << std::endl;
+								std::cout << "[WebRTC] send_video OK pkt#" << idx << " pts=" << pts << std::endl;
 							}
 						}
 						catch (const std::exception& e) {
@@ -534,7 +651,7 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 					}
 				}
 				});
-			encoder.DumpLastEncodeDebug();
+// 移除过时的调试打印
 		}
 		std::cout << "[EncodeThread] " << camera_id << " Exit." << std::endl;
 	});

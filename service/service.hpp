@@ -16,7 +16,6 @@
 #include "../feature/feature.hpp"
 #include "../feature/tridet.hpp"
 
-// libdatachannel
 #include <rtc/rtc.hpp>
 #include <memory>
 #include <map>
@@ -46,7 +45,7 @@ protected:
 		std::shared_ptr<rtc::PeerConnection> pc;
 		std::shared_ptr<rtc::Track> track;
 		std::shared_ptr<rtc::H264RtpPacketizer> packetizer; // 持有打包器链的生命周期
-		std::function<void(const rtc::byte*, size_t)> send_video;
+		std::function<void(const rtc::byte*, size_t, int64_t)> send_video;
 		std::atomic<bool> track_ready{false}; // onOpen 触发后置 true，onClosed 置 false
 	};
 	// camera_id -> sessions
@@ -55,6 +54,7 @@ protected:
 
 	httplib::Server server_;
 	ThreadSafeDict<std::string, bool> camera_thread_manager;
+	ThreadSafeDict<std::string, bool> keyframe_requests; // 记录各相机是否需要立即产出关键帧
 	ThreadSafeDict<int, int> GPU_ID_manager;
 
 	// I3D 特征提取模型
