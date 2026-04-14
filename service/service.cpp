@@ -295,9 +295,11 @@ int PilotWebServer::set_camera_interface() {
     		SSRC, "video", TARGET_PT, rtc::H264RtpPacketizer::ClockRate
 		);
 
-		// 打包器构造函数的第三个参数是 MTU 大小（1200），显式限制以防公网丢包
+		// 切换至 Separator::Length (AVCC 封装)。
+		// 这样做允许我们将一帧内的所有 NALU (SPS/PPS/IDR) 放入单一 buffer 发送，
+		// 确保它们共享同一个时间戳并只在 IDR 结束时携带 M-bit (Marker Bit)。
 		auto packetizer    = std::make_shared<rtc::H264RtpPacketizer>(
-			rtc::H264RtpPacketizer::Separator::StartSequence, rtpConfig, 1200
+			rtc::H264RtpPacketizer::Separator::Length, rtpConfig, 1200
 		);
 
 		auto srReporter    = std::make_shared<rtc::RtcpSrReporter>(rtpConfig);
@@ -321,49 +323,54 @@ int PilotWebServer::set_camera_interface() {
 		constexpr int ENCODE_FPS = 15;
 		session->send_video = [local_track, rtpConfig, camera_id, ENCODE_FPS](const rtc::byte* data, size_t size, int64_t pts) {
 			try {
-				// 每一帧的所有 NALU 共享相同的 90kHz RTP 时间戳
+				// 每一帧的所有 NALU 共享相同的基准时间戳
 				rtpConfig->timestamp = 160000 + static_cast<uint32_t>(pts * (90000 / ENCODE_FPS));
 
-				// 关键修复：手动拆解 Annex-B 里的多个 NALU。
-				// FFmpeg 经常将 SPS/PPS/IDR 粘在一起，导致打包器误将其识别为一个巨大的 SPS。
 				const uint8_t* ptr = reinterpret_cast<const uint8_t*>(data);
 				const uint8_t* end = ptr + size;
 				const uint8_t* nalu_start = nullptr;
 
-				while (ptr < end) {
-					// 寻找 NALU 起始码 (00 00 01 或 00 00 00 01)
-					bool is_start_code = false;
-					int skip = 0;
-					if (ptr + 4 <= end && ptr[0] == 0 && ptr[1] == 0 && ptr[2] == 0 && ptr[3] == 1) {
-						is_start_code = true; skip = 4;
-					} else if (ptr + 3 <= end && ptr[0] == 0 && ptr[1] == 0 && ptr[2] == 1) {
-						is_start_code = true; skip = 3;
-					}
+				// 构造 AVCC 格式数据包：[4字节长度][NALU载荷][4字节长度][NALU载荷]...
+				std::vector<uint8_t> avcc_buffer;
+				auto flush_nalu = [&](const uint8_t* start, const uint8_t* end) {
+					if (!start || start >= end) return;
+					// 探测载荷起始位置（跳过 Annex-B 起始码）
+					const uint8_t* payload = start;
+					if (start[2] == 1) payload += 3;
+					else if (start[3] == 1) payload += 4;
+					
+					size_t payload_size = end - payload;
+					if (payload_size == 0) return;
 
-					if (is_start_code) {
-						if (nalu_start) {
-							// 发送上一个找到的完整 NALU，显式转换回 rtc::byte* 指针以匹配 rtc::binary 的迭代器构造
-							local_track->send(rtc::binary(reinterpret_cast<const rtc::byte*>(nalu_start), reinterpret_cast<const rtc::byte*>(ptr)));
-						}
+					// 注入 4 字节大端长度 (Big Endian Length)
+					uint32_t len = static_cast<uint32_t>(payload_size);
+					avcc_buffer.push_back((len >> 24) & 0xFF);
+					avcc_buffer.push_back((len >> 16) & 0xFF);
+					avcc_buffer.push_back((len >> 8) & 0xFF);
+					avcc_buffer.push_back(len & 0xFF);
+					
+					// 注入载荷
+					avcc_buffer.insert(avcc_buffer.end(), payload, end);
+				};
+
+				while (ptr < end) {
+					bool is_start = false;
+					if (ptr + 4 <= end && ptr[0] == 0 && ptr[1] == 0 && ptr[2] == 0 && ptr[3] == 1) is_start = true;
+					else if (ptr + 3 <= end && ptr[0] == 0 && ptr[1] == 0 && ptr[2] == 1) is_start = true;
+
+					if (is_start) {
+						if (nalu_start) flush_nalu(nalu_start, ptr);
 						nalu_start = ptr;
-						ptr += skip;
+						ptr += (ptr[2] == 0 ? 4 : 3);
 					} else {
 						ptr++;
 					}
 				}
-				
-				// 发送 buffer 中的最后一个 NALU
-				if (nalu_start) {
-					// 调试日志：探测最后一个 NALU 类型
-					uint8_t nalu_type = 0;
-					if (nalu_start[2] == 1) nalu_type = nalu_start[3] & 0x1F;
-					else if (nalu_start[3] == 1) nalu_type = nalu_start[4] & 0x1F;
+				if (nalu_start) flush_nalu(nalu_start, end);
 
-					if (nalu_type == 7 || nalu_type == 8 || nalu_type == 5 || pts % 200 == 0) {
-						std::cout << "🔍 [WebRTC Send] " << camera_id << " Type=" << (int)nalu_type 
-						          << " Size=" << (end - nalu_start) << " TS=" << rtpConfig->timestamp << std::endl;
-					}
-					local_track->send(rtc::binary(reinterpret_cast<const rtc::byte*>(nalu_start), reinterpret_cast<const rtc::byte*>(end)));
+				if (!avcc_buffer.empty()) {
+					local_track->send(rtc::binary(reinterpret_cast<const rtc::byte*>(avcc_buffer.data()), 
+					                              reinterpret_cast<const rtc::byte*>(avcc_buffer.data() + avcc_buffer.size())));
 				}
 			} catch (const std::exception& e) {
 				std::cerr << "🔴 [WebRTC Send Error] Camera " << camera_id << ": " << e.what() << std::endl;
@@ -399,8 +406,8 @@ int PilotWebServer::set_camera_interface() {
 				if (setup_pos != std::string::npos) sdp.replace(setup_pos, 15, "a=setup:active");
 
 				// 2. 强制确保 H.264 的关键参数对齐（注意严格使用 \r\n）
-				// packetization-mode=1 必须启用，否则浏览器无法重组 FU-A 分片包
-				std::string h264_fmtp = "a=fmtp:103 packetization-mode=1;profile-level-id=42c01f\r\n";
+				// 使用 Constrained Baseline (42e0xx)，这是 WebRTC 厂商支持最好的 Profile
+				std::string h264_fmtp = "a=fmtp:103 packetization-mode=1;profile-level-id=42001f\r\n";
 				size_t fmtp_pos = sdp.find("a=fmtp:103");
 				if (fmtp_pos != std::string::npos) {
 					size_t line_end = sdp.find("\n", fmtp_pos);

@@ -48,6 +48,7 @@ bool H264Encoder::Init(int width, int height, int fps, int bitrate) {
     codec_ctx->pix_fmt     = AV_PIX_FMT_YUV420P;
     codec_ctx->bit_rate    = bitrate;
     codec_ctx->max_b_frames = 0;
+    codec_ctx->level = 40; // 提升至 Level 4.0
     // 每秒一个 IDR 关键帧，保证客户端断线重连后快速恢复画面
     codec_ctx->gop_size    = fps;
     // 不使用全局头（SPS/PPS 内嵌在每个关键帧数据包中），适配 Annex-B / RTP
