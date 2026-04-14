@@ -49,7 +49,7 @@ public:
 
         if (mem_queue_.size() < mem_limit_ && disk_write_idx_ == disk_read_idx_) {
             mem_queue_.push(frame.clone());
-            std::cout << "[algoqueue]write into memory|frame_queue size: "<< mem_queue_.size() << std::endl;
+            // std::cout << "[algoqueue]write into memory|frame_queue size: "<< mem_queue_.size() << std::endl;
         }
         else {
             // Write to disk file

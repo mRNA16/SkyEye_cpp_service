@@ -164,29 +164,27 @@ int PilotWebServer::set_camera_interface() {
 		}
 
 		rtc::Configuration config;
+		// 显式绑定到所有本地接口，解决虚拟网卡导致的路径不可达问题
+		config.bindAddress = "0.0.0.0";
 		auto pc = std::make_shared<rtc::PeerConnection>(config);
-		
-		// 使用 Description::Video 创建支持 H.264 的视频轨道
-		rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
-		video.addH264Codec(96); // 96 为 H.264 的常用 Payload Type
-		auto local_track = pc->addTrack(video);
 
+		// session 在 Step3 填充完成后再注册到 webrtc_sessions
 		auto session = std::make_shared<WebRTCSession>();
 		session->pc = pc;
-		// forward encoded NALUs to the local track
-		session->send_video = [local_track](const rtc::byte* data, size_t size) {
-			try {
-				if (local_track) local_track->send(data, size);
-			} catch (...) {}
-		};
 
-		{
-			std::lock_guard<std::mutex> lock(sessions_mtx);
-			webrtc_sessions[camera_id].push_back(session);
-		}
 
+		// 1. 先注册所有回调
+		// 2. setRemoteDescription(offer)   让库解析 offer 的 m-line 结构
+		// 3. addTrack()                    此时库知道 offer 顺序，answer 会镜像它
+		// 4. setLocalDescription()         生成与 offer m-line 顺序一致的 answer
+		// 5. gatherLocalCandidates()       触发 ICE 收集
+
+		// === Step 1: 注册所有回调 ===
 		pc->onStateChange([this, camera_id, session](rtc::PeerConnection::State state) {
-			std::cout << "[WebRTC] Camera " << camera_id << " State: " << state << std::endl;
+			std::cout << "[WebRTC] Camera " << camera_id << " Connection State -> " << state << std::endl;
+			if (state == rtc::PeerConnection::State::Connected) {
+				std::cout << "🔥🔥🔥 [WebRTC Success] P2P tunnel established for " << camera_id << "!" << std::endl;
+			}
 			if (state == rtc::PeerConnection::State::Closed || state == rtc::PeerConnection::State::Failed) {
 				std::lock_guard<std::mutex> lock(sessions_mtx);
 				auto& sessions = webrtc_sessions[camera_id];
@@ -194,33 +192,86 @@ int PilotWebServer::set_camera_interface() {
 			}
 		});
 
-		// 必须使用 shared_ptr 封装 promise，因为回调是异步的，原 local 变量生命周期不足
-		auto answer_promise = std::make_shared<std::promise<std::string>>();
-		auto answer_future = answer_promise->get_future();
-		auto done = std::make_shared<std::atomic<bool>>(false);
-		
-		pc->onLocalDescription([answer_promise, done](rtc::Description description) {
-			if (!done->exchange(true)) {
-				answer_promise->set_value(std::string(description));
+		pc->onLocalCandidate([camera_id](rtc::Candidate candidate) {
+			std::cout << "[WebRTC] Local Candidate (" << camera_id << "): " << std::string(candidate) << std::endl;
+		});
+
+		auto gather_promise = std::make_shared<std::promise<std::string>>();
+		auto gather_future  = gather_promise->get_future();
+		auto gather_done    = std::make_shared<std::atomic<bool>>(false);
+		pc->onGatheringStateChange([pc, gather_promise, gather_done](rtc::PeerConnection::GatheringState state) {
+			if (state == rtc::PeerConnection::GatheringState::Complete) {
+				if (!gather_done->exchange(true)) {
+					if (auto desc = pc->localDescription()) {
+						gather_promise->set_value(std::string(*desc));
+					}
+				}
 			}
 		});
 
+		// === Step 2: 先解析 offer，库记住 m-line 顺序 ===
 		try {
 			pc->setRemoteDescription(rtc::Description(sdp, rtc::Description::Type::Offer));
 		} catch (const std::exception& e) {
 			res.status = 500;
-			res.set_content(std::string("SDP Error: ") + e.what(), "text/plain");
+			res.set_content(std::string("SDP setRemoteDescription Error: ") + e.what(), "text/plain");
 			return;
 		}
 
-		if (answer_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+		// === Step 3: offer 已知后再 addTrack，answer 将严格镜像 offer 的 m-line 顺序 ===
+		rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
+		video.addH264Codec(96);
+		auto local_track = pc->addTrack(video);
+
+		// 构建 RTP 打包器链并挂到 track
+		constexpr uint32_t SSRC = 42;
+		auto rtpConfig     = std::make_shared<rtc::RtpPacketizationConfig>(
+			SSRC, "video", 96, rtc::H264RtpPacketizer::ClockRate
+		);
+		auto packetizer    = std::make_shared<rtc::H264RtpPacketizer>(
+			rtc::H264RtpPacketizer::Separator::StartSequence, rtpConfig
+		);
+		auto srReporter    = std::make_shared<rtc::RtcpSrReporter>(rtpConfig);
+		auto nackResponder = std::make_shared<rtc::RtcpNackResponder>();
+		packetizer->addToChain(srReporter);
+		srReporter->addToChain(nackResponder);
+		local_track->setMediaHandler(packetizer);
+
+		// 填充 session
+		session->track      = local_track;
+		session->packetizer = packetizer;
+		session->send_video = [local_track, rtpConfig](const rtc::byte* data, size_t size) {
+			try {
+				rtpConfig->timestamp += rtc::H264RtpPacketizer::ClockRate / 15;
+				local_track->send(rtc::binary(data, data + size));
+			} catch (...) {}
+		};
+		{
+			std::lock_guard<std::mutex> lock(sessions_mtx);
+			webrtc_sessions[camera_id].push_back(session);
+		}
+
+		// === Step 4 & 5: 生成 answer 并收集 ICE 候选 ===
+		try {
+			pc->setLocalDescription();       // answer m-line 顺序 == offer m-line 顺序 ✅
+			pc->gatherLocalCandidates();     // 触发异步 ICE 收集
+		} catch (const std::exception& e) {
+			res.status = 500;
+			res.set_content(std::string("SDP setLocalDescription Error: ") + e.what(), "text/plain");
+			return;
+		}
+
+		// 等待 ICE Gathering 完成（最多 10 秒），把含所有 candidate 的完整 SDP 回给浏览器
+		if (gather_future.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
 			json response;
 			response["type"] = "answer";
-			response["sdp"] = answer_future.get();
+			response["sdp"]  = gather_future.get();
+			std::cout << "[WebRTC] ICE Gathering complete. Sending Answer with candidates for " << camera_id << std::endl;
 			res.set_content(response.dump(), "application/json");
 		} else {
+			std::cerr << "[WebRTC] ICE Gathering TIMEOUT for " << camera_id << std::endl;
 			res.status = 500;
-			res.set_content("WebRTC Signaling Timeout", "text/plain");
+			res.set_content("ICE Gathering Timeout", "text/plain");
 		}
 	});
 
@@ -367,10 +418,10 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 								} catch (...) {}
 							}
 						}
-						// 采样日志输出，避免过快刷屏
+						// 采样日志输出，每 15 帧（约 1 秒）输出一次以确认健康度
 						static int frame_cnt = 0;
-						if (sent_count > 0 && frame_cnt++ % 60 == 0) {
-							std::cout << "[WebRTC] Streaming to " << sent_count << " peers for " << camera_id << std::endl;
+						if (sent_count > 0 && frame_cnt++ % 15 == 0) {
+							std::cout << "[WebRTC] Streaming active: pushing frames to " << sent_count << " monitor(s)" << std::endl;
 						}
 					});
 				}

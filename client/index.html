@@ -545,7 +545,7 @@
             appendLog("Initializing WebRTC Handshake...");
 
             pc = new RTCPeerConnection({
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                iceServers: [] // 本地调试优先禁用外部 STUN
             });
 
             pc.ontrack = (event) => {
@@ -595,8 +595,14 @@
                 }
             };
 
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    appendLog(`[Local Browser Candidate]: ${event.candidate.candidate}`);
+                }
+            };
+
             pc.onicegatheringstatechange = () => {
-                appendLog(`ICE Gathering: ${pc.iceGatheringState}`);
+                appendLog(`ICE Gathering: <b>${pc.iceGatheringState}</b>`);
                 if (pc.iceGatheringState === 'complete') {
                     sendOffer();
                 }
@@ -608,13 +614,13 @@
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
 
-            // 兜底逻辑：如果 10 秒内 ICE 没收集完，也尝试发送
+            // 增加超时保护到 15 秒
             setTimeout(() => {
                 if (!sdpSent) {
                     appendLog("ICE Gathering Timeout, forcing offer send...");
                     sendOffer();
                 }
-            }, 10000);
+            }, 15000);
         }
 
         function stopWebRTC() {

@@ -44,6 +44,8 @@ protected:
 	// WebRTC 相关
 	struct WebRTCSession {
 		std::shared_ptr<rtc::PeerConnection> pc;
+		std::shared_ptr<rtc::Track> track;
+		std::shared_ptr<rtc::H264RtpPacketizer> packetizer; // 持有打包器链的生命周期
 		std::function<void(const rtc::byte*, size_t)> send_video;
 	};
 	// camera_id -> sessions

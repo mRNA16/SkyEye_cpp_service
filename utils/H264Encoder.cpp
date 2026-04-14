@@ -20,16 +20,13 @@ bool H264Encoder::Init(int width, int height, int fps, int bitrate) {
     Cleanup();
 
     const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-    if (!codec) codec = avcodec_find_encoder_by_name("libx264");
-    if (!codec) codec = avcodec_find_encoder_by_name("h264_nvenc"); // NVIDIA 硬件加速
-    if (!codec) codec = avcodec_find_encoder_by_name("h264_mf");    // Windows Media Foundation
+    if (!codec) codec = avcodec_find_encoder_by_name("h264_nvenc"); // NVIDIA 显卡优先
+    if (!codec) codec = avcodec_find_encoder_by_name("h264_mf");    // Windows 媒体基金保底
+    if (!codec) codec = avcodec_find_encoder_by_name("libx264");   // 软编
     if (!codec) codec = avcodec_find_encoder_by_name("h264");
     
-    // 如果实在没有 H264 编码器，尝试 mpeg4 做最后保底（虽然 WebRTC 兼容性较差，但至少能运行）
-    if (!codec) codec = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
-
     if (!codec) {
-        std::cerr << "[H264Encoder] CRITICAL: No suitable encoder found (tried h264, libx264, nvenc, mf, mpeg4)." << std::endl;
+        std::cerr << "[H264Encoder] FATAL: NO H.264 encoder found! WebRTC requires H.264/VP8/VP9." << std::endl;
         return false;
     }
 
