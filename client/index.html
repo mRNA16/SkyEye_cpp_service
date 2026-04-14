@@ -550,6 +550,7 @@
 
             pc.ontrack = (event) => {
                 appendLog("WebRTC Stream Received! Attaching to player...");
+                appendLog(`ontrack: streams=${event.streams ? event.streams.length : 0}, kind=${event.track?.kind}, readyState=${event.track?.readyState}`);
                 if (event.streams && event.streams[0]) {
                     liveVideo.srcObject = event.streams[0];
                 } else {
@@ -559,7 +560,15 @@
                 }
                 videoContainer.style.display = 'block';
                 emptyState.style.display = 'none';
-                liveVideo.play().catch(() => { });
+                liveVideo.play().catch((e) => { appendLog(`video.play() rejected: ${e.message}`); });
+            };
+
+            liveVideo.onloadedmetadata = () => appendLog("video loadedmetadata");
+            liveVideo.onplaying = () => appendLog("video playing");
+            liveVideo.onerror = (e) => appendLog(`video error: ${e?.message || 'unknown'}`);
+
+            pc.onconnectionstatechange = () => {
+                appendLog(`PeerConnection State: <b>${pc.connectionState}</b>`);
             };
 
             pc.oniceconnectionstatechange = () => {

@@ -173,15 +173,21 @@ int PilotWebServer::set_camera_interface() {
 		session->pc = pc;
 
 
-		// 1. 先注册所有回调
-		// 2. setRemoteDescription(offer)   让库解析 offer 的 m-line 结构
-		// 3. addTrack()                    此时库知道 offer 顺序，answer 会镜像它
+		// 正确的应答流程（libdatachannel）：
+		// 1. 注册所有回调（含 onTrack）
+		// 2. setRemoteDescription(offer)   → 库解析 offer 的 m-line，
+		//    对每个 m-line 触发 onTrack 回调，返回可用的 Track
+		// 3. 在 onTrack 得到的 Track 上挂载 RTP 打包器
+		//    ★ 不要 addTrack()！那会新增 m-line，导致 answer 与 offer 的 m-line 数量不匹配
 		// 4. setLocalDescription()         生成与 offer m-line 顺序一致的 answer
 		// 5. gatherLocalCandidates()       触发 ICE 收集
 
 		// === Step 1: 注册所有回调 ===
 		pc->onStateChange([this, camera_id, session](rtc::PeerConnection::State state) {
 			std::cout << "[WebRTC] Camera " << camera_id << " Connection State -> " << state << std::endl;
+			if (state == rtc::PeerConnection::State::Connecting) {
+				std::cout << "[WebRTC] Camera " << camera_id << " PeerConnection CONNECTING" << std::endl;
+			}
 			if (state == rtc::PeerConnection::State::Connected) {
 				std::cout << "🔥🔥🔥 [WebRTC Success] P2P tunnel established for " << camera_id << "!" << std::endl;
 			}
@@ -200,16 +206,33 @@ int PilotWebServer::set_camera_interface() {
 		auto gather_future  = gather_promise->get_future();
 		auto gather_done    = std::make_shared<std::atomic<bool>>(false);
 		pc->onGatheringStateChange([pc, gather_promise, gather_done](rtc::PeerConnection::GatheringState state) {
+			std::cout << "[WebRTC] Gathering State -> " << static_cast<int>(state) << std::endl;
 			if (state == rtc::PeerConnection::GatheringState::Complete) {
 				if (!gather_done->exchange(true)) {
 					if (auto desc = pc->localDescription()) {
+						std::cout << "[WebRTC] Local Description Ready, length = " << std::string(*desc).size() << std::endl;
 						gather_promise->set_value(std::string(*desc));
 					}
 				}
 			}
 		});
 
-		// === Step 2: 先解析 offer，库记住 m-line 顺序 ===
+		// === Step 2: 注册 onTrack 并解析 offer ===
+		// 浏览器 offer 中 m=video 为 recvonly，setRemoteDescription 后
+		// libdatachannel 会为该 m-line 创建一个 Track 并通过 onTrack 传出。
+		// 服务端在此 Track 上发送视频，无需 addTrack()（那会多出一个 m-line）。
+		auto track_promise  = std::make_shared<std::promise<std::shared_ptr<rtc::Track>>>();
+		auto track_future   = track_promise->get_future();
+		auto track_received = std::make_shared<std::atomic<bool>>(false);
+
+		pc->onTrack([camera_id, track_promise, track_received](std::shared_ptr<rtc::Track> track) {
+			std::cout << "[WebRTC] onTrack fired for camera " << camera_id
+			          << ", mid=" << track->mid() << std::endl;
+			if (!track_received->exchange(true)) {
+				track_promise->set_value(track);
+			}
+		});
+
 		try {
 			pc->setRemoteDescription(rtc::Description(sdp, rtc::Description::Type::Offer));
 		} catch (const std::exception& e) {
@@ -218,14 +241,28 @@ int PilotWebServer::set_camera_interface() {
 			return;
 		}
 
-		// === Step 3: offer 已知后再 addTrack，answer 将严格镜像 offer 的 m-line 顺序 ===
-		rtc::Description::Video video("video", rtc::Description::Direction::SendOnly);
-		video.addH264Codec(96);
-		auto local_track = pc->addTrack(video);
+		// 等待 onTrack 传出 Track（通常在 setRemoteDescription 内同步触发）
+		std::shared_ptr<rtc::Track> local_track;
+		if (track_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+			local_track = track_future.get();
+			std::cout << "[WebRTC] Got track from onTrack, mid=" << local_track->mid() << std::endl;
+		} else {
+			std::cerr << "[WebRTC] ERROR: onTrack not fired after setRemoteDescription!" << std::endl;
+			res.status = 500;
+			res.set_content("onTrack not fired – cannot attach video sender", "text/plain");
+			return;
+		}
 
-		// 构建 RTP 打包器链并挂到 track
+		// === Step 3: 在 onTrack 得到的 Track 上挂载 RTP 打包器 ===
+		local_track->onOpen([camera_id]() {
+			std::cout << "🟢 [WebRTC Track Open] Camera " << camera_id << " is now ready for streaming!" << std::endl;
+		});
+		local_track->onClosed([camera_id]() {
+			std::cout << "[WebRTC] Track Closed for camera " << camera_id << std::endl;
+		});
+
 		constexpr uint32_t SSRC = 42;
-		auto rtpConfig     = std::make_shared<rtc::RtpPacketizationConfig>(
+		auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
 			SSRC, "video", 96, rtc::H264RtpPacketizer::ClockRate
 		);
 		auto packetizer    = std::make_shared<rtc::H264RtpPacketizer>(
@@ -240,33 +277,55 @@ int PilotWebServer::set_camera_interface() {
 		// 填充 session
 		session->track      = local_track;
 		session->packetizer = packetizer;
-		session->send_video = [local_track, rtpConfig](const rtc::byte* data, size_t size) {
+		constexpr int ENCODE_FPS = 15;
+		session->send_video = [local_track, rtpConfig, camera_id, ENCODE_FPS](const rtc::byte* data, size_t size) {
 			try {
-				rtpConfig->timestamp += rtc::H264RtpPacketizer::ClockRate / 15;
-				local_track->send(rtc::binary(data, data + size));
-			} catch (...) {}
+				if (local_track->isOpen()) {
+					rtpConfig->timestamp += rtc::H264RtpPacketizer::ClockRate / ENCODE_FPS;
+					local_track->send(rtc::binary(data, data + size));
+				}
+			} catch (const std::exception& e) {
+				std::cerr << "🔴 [WebRTC Send Error] Camera " << camera_id << ": " << e.what() << std::endl;
+			}
 		};
-		{
-			std::lock_guard<std::mutex> lock(sessions_mtx);
-			webrtc_sessions[camera_id].push_back(session);
-		}
 
 		// === Step 4 & 5: 生成 answer 并收集 ICE 候选 ===
 		try {
-			pc->setLocalDescription();       // answer m-line 顺序 == offer m-line 顺序 ✅
-			pc->gatherLocalCandidates();     // 触发异步 ICE 收集
+			pc->setLocalDescription();
+			pc->gatherLocalCandidates();
 		} catch (const std::exception& e) {
 			res.status = 500;
 			res.set_content(std::string("SDP setLocalDescription Error: ") + e.what(), "text/plain");
 			return;
 		}
 
-		// 等待 ICE Gathering 完成（最多 10 秒），把含所有 candidate 的完整 SDP 回给浏览器
+		// 协商开启后注册会话
+		{
+			std::lock_guard<std::mutex> lock(sessions_mtx);
+			webrtc_sessions[camera_id].push_back(session);
+		}
+
+		// 等待 ICE Gathering 完成...
 		if (gather_future.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
+			std::string answer_sdp = gather_future.get();
+
+			// RFC 规定：answer 中 a=setup 必须是 active 或 passive，不能是 actpass。
+			// libdatachannel 某些版本在作为 answerer 时仍输出 actpass，浏览器会拒绝。
+			// 这里将 actpass 替换为 active（服务端主动发起 DTLS 握手）。
+			{
+				const std::string from = "a=setup:actpass";
+				const std::string to   = "a=setup:active";
+				size_t pos = 0;
+				while ((pos = answer_sdp.find(from, pos)) != std::string::npos) {
+					answer_sdp.replace(pos, from.size(), to);
+					pos += to.size();
+				}
+			}
+
 			json response;
 			response["type"] = "answer";
-			response["sdp"]  = gather_future.get();
-			std::cout << "[WebRTC] ICE Gathering complete. Sending Answer with candidates for " << camera_id << std::endl;
+			response["sdp"]  = answer_sdp;
+			std::cout << "[WebRTC] ICE Gathering complete. Sending Answer for " << camera_id << std::endl;
 			res.set_content(response.dump(), "application/json");
 		} else {
 			std::cerr << "[WebRTC] ICE Gathering TIMEOUT for " << camera_id << std::endl;
@@ -387,52 +446,123 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 }
 
 int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::string& camera_id) {
-	// 直播消费者处理
-	cv::Mat frame;
-	H264Encoder encoder;
-	bool encoder_init = false;
+	// ─────────────────────────────────────────────────────────────────────────
+	// live() 架构说明：
+	//   display_queue 同时被两条消费链路消费：
+	//   1. 本线程（display 线程）：仅负责 cv::imshow，保证本地预览帧率流畅。
+	//   2. encode 线程（内部新建）：专门做 H264 编码 + WebRTC RTP 发送。
+	//
+	// 关键设计：
+	//   - encode 线程有独立的 encode_queue（最大缓存 2 帧），满时丢弃最旧帧，
+	//     确保编码线程不会落后太多，也不会因编码慢而拖垮显示线程。
+	//   - display 线程和 encode 线程完全解耦，互不阻塞。
+	// ─────────────────────────────────────────────────────────────────────────
 
+	// encode_queue 容量为 2：编码跟不上时丢弃旧帧，避免延迟积累
+	ThreadSafeQueue<cv::Mat> encode_queue;
+
+	// ── 编码线程 ──────────────────────────────────────────────────────────────
+	std::thread encode_thread([this, &encode_queue, &camera_id]() {
+		H264Encoder encoder;
+		bool encoder_init = false;
+		constexpr int ENCODE_W   = 1280;
+		constexpr int ENCODE_H   = 720;
+		constexpr int ENCODE_FPS = 15;
+
+		cv::Mat enc_frame;
+		while (encode_queue.wait_and_pop(enc_frame)) {
+			if (enc_frame.empty()) continue;
+
+			// 快照当前 sessions，避免持锁期间调用 send_video（防死锁）
+			std::vector<std::shared_ptr<WebRTCSession>> sessions_snapshot;
+			{
+				std::lock_guard<std::mutex> lock(sessions_mtx);
+				auto it = webrtc_sessions.find(camera_id);
+				if (it != webrtc_sessions.end()) {
+					sessions_snapshot = it->second;
+				}
+			}
+
+			// 无 WebRTC 客户端时不编码，节省 CPU
+			if (sessions_snapshot.empty()) continue;
+
+			// 懒初始化编码器（首次有客户端接入才启动）
+			if (!encoder_init) {
+				encoder_init = encoder.Init(ENCODE_W, ENCODE_H, ENCODE_FPS, 3000000);
+				if (!encoder_init) {
+					std::cerr << "[EncodeThread] H264Encoder Init failed!" << std::endl;
+					continue;
+				}
+				std::cout << "[EncodeThread] H264Encoder initialized for " << camera_id << std::endl;
+			}
+
+			// 缩放 + 编码
+			cv::Mat small_frame;
+			cv::resize(enc_frame, small_frame, cv::Size(ENCODE_W, ENCODE_H));
+
+			encoder.Encode(small_frame, [&sessions_snapshot](const uint8_t* data, size_t size) {
+				static std::atomic<int> packet_idx{ 0 };
+				int idx = packet_idx.fetch_add(1);
+				// 前 8 个 packet 打印头部字节，用于确认 Annex-B 格式
+				if (idx < 8) {
+					std::ostringstream oss;
+					oss << "[H264] pkt#" << idx << " size=" << size << " head=";
+					for (size_t i = 0; i < std::min<size_t>(size, 8); ++i) {
+						oss << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << static_cast<int>(data[i]) << ' ';
+					}
+					std::cout << oss.str() << std::endl;
+				}
+				for (auto& session : sessions_snapshot) {
+					// 关键修复：移除 isOpen() 硬门槛
+					// libdatachannel 中 PeerConnection::Connected != Track::Open，
+					// isOpen() 可能长期为 false 即使连接已建立，导致所有帧被丢弃。
+					// 改为只要 track 存在且 send_video 可用就直接尝试发送，
+					// 内部 send_video 已有 try/catch 保护，不会崩溃。
+					if (session->track && session->send_video) {
+						try {
+							session->send_video(reinterpret_cast<const rtc::byte*>(data), size);
+							if (idx < 4) {
+								std::cout << "[WebRTC] send_video OK pkt#" << idx << std::endl;
+							}
+						}
+						catch (const std::exception& e) {
+							if (idx < 8) std::cerr << "[WebRTC] send_video exception pkt#" << idx << ": " << e.what() << std::endl;
+						}
+						catch (...) {
+							if (idx < 8) std::cerr << "[WebRTC] send_video unknown exception pkt#" << idx << std::endl;
+						}
+					}
+				}
+				});
+			encoder.DumpLastEncodeDebug();
+		}
+		std::cout << "[EncodeThread] " << camera_id << " Exit." << std::endl;
+	});
+
+	// ── 显示线程（当前线程）────────────────────────────────────────────────────
+	cv::Mat frame;
 	while (display_queue.wait_and_pop(frame)) {
 		if (frame.empty()) continue;
 
-		// 网页 WebRTC 视频输出
-		{
-			std::lock_guard<std::mutex> lock(sessions_mtx);
-			if (webrtc_sessions.count(camera_id) && !webrtc_sessions[camera_id].empty()) {
-				if (!encoder_init) {
-					encoder_init = encoder.Init(frame.cols, frame.rows, 15);
-				}
-				if (encoder_init) {
-					encoder.Encode(frame, [this, &camera_id](const uint8_t* data, size_t size) {
-						// 注意：此处回调是同步触发的，已经在外层 sessions_mtx 的锁保护下
-						// 因此绝对不能再次通过 std::lock_guard 锁定同一个 mutex，否则会导致死锁或 system_error
-						auto& active_sessions = this->webrtc_sessions[camera_id];
-						int sent_count = 0;
-						for (auto& session : active_sessions) {
-							if (session->pc->state() == rtc::PeerConnection::State::Connected) {
-								try {
-									if (session->send_video) {
-										session->send_video(reinterpret_cast<const rtc::byte*>(data), size);
-										sent_count++;
-									}
-								} catch (...) {}
-							}
-						}
-						// 采样日志输出，每 15 帧（约 1 秒）输出一次以确认健康度
-						static int frame_cnt = 0;
-						if (sent_count > 0 && frame_cnt++ % 15 == 0) {
-							std::cout << "[WebRTC] Streaming active: pushing frames to " << sent_count << " monitor(s)" << std::endl;
-						}
-					});
-				}
-			}
+		// 向编码队列投递帧副本；若队列已满（编码跟不上），丢弃最旧帧保持低延迟
+		// try_push(val, 2) 表示队列超过 2 帧时不入队，防止延迟积累
+		if (!encode_queue.try_push(frame.clone(), 2)) {
+			cv::Mat dummy;
+			encode_queue.try_pop(dummy);            // 弹出最旧帧
+			encode_queue.try_push(frame.clone(), 2); // 压入最新帧
 		}
 
+		// 本地预览：不受编码耗时影响，帧率完全跟随 RTSP 源
 		cv::imshow("Pilot_" + camera_id, frame);
-		if (cv::waitKey(1) == 27) { // ESC
+		if (cv::waitKey(1) == 27) { // ESC 退出
 			break;
 		}
 	}
+
+	// display_queue 耗尽后停止 encode 线程
+	encode_queue.stop();
+	if (encode_thread.joinable()) encode_thread.join();
+
 	cv::destroyWindow("Pilot_" + camera_id);
 	std::cout << "[Display Thread] " << camera_id << " Exit." << std::endl;
 	return 0;

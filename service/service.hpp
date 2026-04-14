@@ -47,6 +47,7 @@ protected:
 		std::shared_ptr<rtc::Track> track;
 		std::shared_ptr<rtc::H264RtpPacketizer> packetizer; // 持有打包器链的生命周期
 		std::function<void(const rtc::byte*, size_t)> send_video;
+		std::atomic<bool> track_ready{false}; // onOpen 触发后置 true，onClosed 置 false
 	};
 	// camera_id -> sessions
 	std::mutex sessions_mtx;

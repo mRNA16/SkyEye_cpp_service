@@ -23,6 +23,15 @@ public:
         cond_var_.notify_one();
     }
 
+    // 非阻塞入队：队列大小超过 max_size 时返回 false，不阻塞调用方
+    bool try_push(T value, size_t max_size = SIZE_MAX) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (queue_.size() >= max_size) return false;
+        queue_.push(std::move(value));
+        cond_var_.notify_one();
+        return true;
+    }
+
     bool wait_and_pop(T& value) {
         std::unique_lock<std::mutex> lock(mutex_);
         cond_var_.wait(lock, [this] { return !queue_.empty() || stop_flag_; });
