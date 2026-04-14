@@ -526,7 +526,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 		
 		// 调整大小至 448x448 以匹配模型输入并节省内存/磁盘开销
 		cv::Mat resized_frame;
-		cv::resize(input_frame, resized_frame, cv::Size(448, 448));
+		cv::resize(input_frame, resized_frame, cv::Size(448, 448), 0, 0, cv::INTER_NEAREST); // 使用最快缩放算法
 		frame_queue.push(resized_frame);
 	}
 
@@ -597,9 +597,10 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 			// 无 WebRTC 客户端时不编码，节省 CPU
 			if (sessions_snapshot.empty()) continue;
 
-			// 懒初始化编码器（首次有客户端接入才启动）
+			// 懒初始化编码器
 			if (!encoder_init) {
-				encoder_init = encoder.Init(ENCODE_W, ENCODE_H, ENCODE_FPS, 2000000);
+				// 提升画质：码率从 2M 提升到 4M，显著减少画面浑浊
+				encoder_init = encoder.Init(ENCODE_W, ENCODE_H, ENCODE_FPS, 4000000);
 				if (!encoder_init) {
 					std::cerr << "[EncodeThread] H264Encoder Init failed!" << std::endl;
 					continue;
@@ -609,7 +610,11 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 
 			// 缩放 + 编码
 			cv::Mat small_frame;
-			cv::resize(enc_frame, small_frame, cv::Size(ENCODE_W, ENCODE_H));
+			if (enc_frame.cols == ENCODE_W && enc_frame.rows == ENCODE_H) {
+				small_frame = enc_frame;
+			} else {
+				cv::resize(enc_frame, small_frame, cv::Size(ENCODE_W, ENCODE_H), 0, 0, cv::INTER_LINEAR);
+			}
 
 			// 检查是否有 PLI 请求，强制产生一个关键帧
 			if (this->keyframe_requests.has(camera_id) && this->keyframe_requests.get(camera_id)) {
@@ -646,7 +651,6 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 					}
 				}
 				});
-// 移除过时的调试打印
 		}
 		std::cout << "[EncodeThread] " << camera_id << " Exit." << std::endl;
 	});
