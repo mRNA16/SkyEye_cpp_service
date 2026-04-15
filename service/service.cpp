@@ -169,6 +169,15 @@ int PilotWebServer::set_camera_interface() {
 		res.set_content(response.dump(), "application/json");
 	});
 
+	server_.Post("/toggle_display", [this](const httplib::Request& req, httplib::Response& res) {
+		enable_display_ = !enable_display_;
+		json response;
+		response["code"] = 200;
+		response["enable_display"] = enable_display_.load();
+		response["msg"] = std::string("Local display ") + (enable_display_ ? "ON" : "OFF");
+		res.set_content(response.dump(), "application/json");
+	});
+
 	// WebRTC 信令端点 (Offer -> Answer)
 	server_.Post("/webrtc/offer", [this](const httplib::Request& req, httplib::Response& res) {
 		json data;
@@ -668,10 +677,12 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 			encode_queue.try_push(frame.clone(), 2); // 压入最新帧
 		}
 
-		// 本地预览：不受编码耗时影响，帧率完全跟随 RTSP 源
-		cv::imshow("Pilot_" + camera_id, frame);
-		if (cv::waitKey(1) == 27) { // ESC 退出
-			break;
+		// 本地预览：仅在调试显示开关开启时执行，关闭可节省大量 GUI 资源占用
+		if (enable_display_) {
+			cv::imshow("Pilot_" + camera_id, frame);
+			if (cv::waitKey(1) == 27) { // ESC 退出
+				break;
+			}
 		}
 	}
 
@@ -679,7 +690,9 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 	encode_queue.stop();
 	if (encode_thread.joinable()) encode_thread.join();
 
-	cv::destroyWindow("Pilot_" + camera_id);
+	if (enable_display_) {
+		cv::destroyWindow("Pilot_" + camera_id);
+	}
 	std::cout << "[Display Thread] " << camera_id << " Exit." << std::endl;
 	return 0;
 }

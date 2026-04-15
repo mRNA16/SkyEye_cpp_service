@@ -53,6 +53,7 @@ protected:
 	std::map<std::string, std::vector<std::shared_ptr<WebRTCSession>>> webrtc_sessions;
 
 	httplib::Server server_;
+	std::atomic<bool> enable_display_{ false }; // 是否启用本地 OpenCV 窗口预览
 	ThreadSafeDict<std::string, bool> camera_thread_manager;
 	ThreadSafeDict<std::string, bool> keyframe_requests; // 记录各相机是否需要立即产出关键帧
 	ThreadSafeDict<int, int> GPU_ID_manager;
