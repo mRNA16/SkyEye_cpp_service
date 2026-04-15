@@ -795,13 +795,32 @@ int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_
 		return a.start_time < b.start_time; 
 	});
 	
+	// 3. 结果整合优化：合并相邻且同类的动作碎片，并提高过滤阈值
+	std::vector<ActionSegment> merged_segments;
+	float merge_thresh_sec = 1.2f;   // 缩短合并间距
+	float min_display_score = 0.10f; // 调回温和阈值，防止漏检
+
+	for (const auto& seg : global_segments) {
+		if (seg.score < min_display_score) continue;
+
+		if (merged_segments.empty() || 
+			seg.label != merged_segments.back().label || 
+			seg.start_time > (merged_segments.back().end_time + merge_thresh_sec)) {
+			// 如果是新动作，或者与上一个动作间隔太远，则直接添加
+			merged_segments.push_back(seg);
+		} else {
+			// 否则，合并到上一个动作中
+			merged_segments.back().end_time = std::max(merged_segments.back().end_time, seg.end_time);
+			merged_segments.back().score = std::max(merged_segments.back().score, seg.score);
+		}
+	}
+
 	// 保存为结果并允许被提
 	json report;
 	report["camera_id"] = camera_id;
 	report["summary"] = "Action Detection Report";
 	report["actions"] = json::array();
-	for (auto& seg : global_segments) {
-        if(seg.score <= 0.05f) continue;
+	for (auto& seg : merged_segments) {
 		json item;
 		item["start"] = seg.start_time;
 		item["end"] = seg.end_time;
