@@ -458,6 +458,10 @@ int PilotWebServer::set_camera_interface() {
 }
 
 int PilotWebServer::launch_camera(const std::string& camera_id, const std::string& rtsp_url) {
+	// 在启动新任务前，先清理可能存在的旧报告文件，防止前端轮询误触
+	std::string old_report = "report_" + camera_id + ".json";
+	std::remove(old_report.c_str());
+
 	cv::VideoCapture cap(rtsp_url, cv::CAP_FFMPEG);
 	if (!cap.isOpened()) {
 		std::cerr << "Failed to open rtsp stream:" << rtsp_url << std::endl;
@@ -572,13 +576,11 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 	//   1. 本线程（display 线程）：仅负责 cv::imshow，保证本地预览帧率流畅。
 	//   2. encode 线程（内部新建）：专门做 H264 编码 + WebRTC RTP 发送。
 	//
-	// 关键设计：
 	//   - encode 线程有独立的 encode_queue（最大缓存 2 帧），满时丢弃最旧帧，
 	//     确保编码线程不会落后太多，也不会因编码慢而拖垮显示线程。
 	//   - display 线程和 encode 线程完全解耦，互不阻塞。
 	// ─────────────────────────────────────────────────────────────────────────
 
-	// encode_queue 容量为 2：编码跟不上时丢弃旧帧，避免延迟积累
 	ThreadSafeQueue<cv::Mat> encode_queue;
 
 	// ── 编码线程 ──────────────────────────────────────────────────────────────
@@ -709,7 +711,15 @@ int PilotWebServer::extract_features(HybridVideoQueue& frame_queue,ThreadSafeQue
 		if (local_window_frames.size() >= CHUNK_SIZE) {
 			std::vector<cv::Mat> infer_frames(local_window_frames.begin(), local_window_frames.begin() + CHUNK_SIZE);
 			std::vector<float> features = this->i3d_model_->Run(infer_frames);
-			feature_queue.push(features);
+			if (!features.empty()) {
+				// 执行 L2 归一化：将 1024 维特征映射到单位超球面
+				float sum_sq = 0.0f;
+				for (float f : features) sum_sq += f * f;
+				float norm = std::sqrt(sum_sq + 1e-6f);
+				for (float& f : features) f /= norm;
+				
+				feature_queue.push(features);
+			}
 			for (int i = 0; i < 4; ++i) local_window_frames.pop_front();
 		}
 	}
