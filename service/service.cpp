@@ -462,6 +462,13 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	std::string old_report = "report_" + camera_id + ".json";
 	std::remove(old_report.c_str());
 
+	// 重置全局分类评分累加器，确保每次直播都是独立统计
+	{
+		std::lock_guard<std::mutex> lock(global_logits_mtx_);
+		global_logits_accum_.clear();
+		global_logits_count_ = 0;
+	}
+
 	cv::VideoCapture cap(rtsp_url, cv::CAP_FFMPEG);
 	if (!cap.isOpened()) {
 		std::cerr << "Failed to open rtsp stream:" << rtsp_url << std::endl;
@@ -710,15 +717,36 @@ int PilotWebServer::extract_features(HybridVideoQueue& frame_queue,ThreadSafeQue
 
 		if (local_window_frames.size() >= CHUNK_SIZE) {
 			std::vector<cv::Mat> infer_frames(local_window_frames.begin(), local_window_frames.begin() + CHUNK_SIZE);
-			std::vector<float> features = this->i3d_model_->Run(infer_frames);
-			if (!features.empty()) {
-				// 执行 L2 归一化：将 1024 维特征映射到单位超球面
+			
+			// 1. 提取双路输出
+			auto output = this->i3d_model_->Run(infer_frames);
+			
+			if (!output.features.empty()) {
+				// 2. 特征 L2 归一化 (用于 TriDet 输入)
 				float sum_sq = 0.0f;
-				for (float f : features) sum_sq += f * f;
+				for (float f : output.features) sum_sq += f * f;
 				float norm = std::sqrt(sum_sq + 1e-6f);
-				for (float& f : features) f /= norm;
-				
-				feature_queue.push(features);
+				for (float& f : output.features) f /= norm;
+				feature_queue.push(output.features);
+
+				// 3. 累加分类 Logits (用于 Score Fusion)
+				if (!output.logits.empty()) {
+					std::lock_guard<std::mutex> lock(global_logits_mtx_);
+					if (global_logits_accum_.empty()) global_logits_accum_.resize(output.logits.size(), 0.0f);
+					
+					// 执行 Softmax 转换为概率并累加
+					float max_val = *std::max_element(output.logits.begin(), output.logits.end());
+					float exp_sum = 0.0f;
+					std::vector<float> probs(output.logits.size());
+					for(size_t i=0; i<output.logits.size(); ++i) {
+						probs[i] = std::exp(output.logits[i] - max_val);
+						exp_sum += probs[i];
+					}
+					for(size_t i=0; i<probs.size(); ++i) {
+						global_logits_accum_[i] += (probs[i] / exp_sum);
+					}
+					global_logits_count_++;
+				}
 			}
 			for (int i = 0; i < 4; ++i) local_window_frames.pop_front();
 		}
@@ -747,8 +775,20 @@ int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_
 	
 	std::cout << "[Tridet Thread] Stream finished. Acquired total feature chunks: " << all_features.size() << ". Generating offline high performance report..." << std::endl;
 	
-    // 离线使用批处理和1/2重叠度做最后仅仅一次全推理
-	std::vector<ActionSegment> global_segments = tridet_model_->RunOffline(all_features, static_cast<float>(fps), CHUNK_SIZE);
+	// 1. 获取并计算全局平均分类分数 (Score Fusion 依据)
+	std::vector<float> final_global_probs;
+	{
+		std::lock_guard<std::mutex> lock(global_logits_mtx_);
+		if (global_logits_count_ > 0) {
+			final_global_probs.resize(global_logits_accum_.size());
+			for (size_t i = 0; i < global_logits_accum_.size(); ++i) {
+				final_global_probs[i] = global_logits_accum_[i] / static_cast<float>(global_logits_count_);
+			}
+		}
+	}
+
+    // 2. 离线使用全特征重叠推理，并进行全局分值融合
+	std::vector<ActionSegment> global_segments = tridet_model_->RunOffline(all_features, static_cast<float>(fps), CHUNK_SIZE, final_global_probs);
 	
 	// 在全部结束后使用全局 1D-IoU NMS 清理同一动作被随着不同窗口预测产生的多重叠碎片
 	std::sort(global_segments.begin(), global_segments.end(), [](const ActionSegment& a, const ActionSegment& b){

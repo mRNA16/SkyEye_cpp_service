@@ -63,5 +63,10 @@ protected:
 
 	// Tridet 时序动作检测模型
 	std::shared_ptr<Tridet> tridet_model_;
+
+	// 全局分类得分融合（Score Fusion）相关状态
+	std::mutex global_logits_mtx_;
+	std::vector<float> global_logits_accum_;
+	int global_logits_count_ = 0;
 };
 

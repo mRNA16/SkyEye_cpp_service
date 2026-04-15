@@ -13,7 +13,7 @@ constexpr int CHANNEL = 3;
 constexpr int CHUNK_SIZE = 16;
 constexpr int INPUT_H = 224;
 constexpr int INPUT_W = 224;
-const std::string I3D_MODEL_PATH = R"(E:\pilot\i3d\models\a320_new.onnx)";
+const std::string I3D_MODEL_PATH = R"(E:\pilot\i3d\models\a320_new_full.onnx)";
 
 // Tridet / 新动作检测分类数
 constexpr int NUM_CLASSES = 17;

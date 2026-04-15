@@ -38,7 +38,7 @@ int I3D::Init(const std::string& model_path, int device_id) {
     }
 }
 
-std::vector<float> I3D::Run(const std::vector<cv::Mat>& frames) {
+I3DOutput I3D::Run(const std::vector<cv::Mat>& frames) {
     if (frames.size() != static_cast<size_t>(frames_count_)) {
         std::cerr << "I3D Run Error: frames count must be " << frames_count_ << std::endl;
         return {};
@@ -56,19 +56,27 @@ std::vector<float> I3D::Run(const std::vector<cv::Mat>& frames) {
             input_shape.data(), input_shape.size()
         );
 
-        // 3. 运行推理
+        // 3. 运行推理 (请求两个输出)
         auto output_tensors = session_.Run(
             Ort::RunOptions{nullptr}, 
             input_node_names_.data(), &input_tensor, 1, 
-            output_node_names_.data(), 1
+            output_node_names_.data(), output_node_names_.size()
         );
 
-        // 4. 获取输出特征
-        float* floatarr = output_tensors[0].GetTensorMutableData<float>();
-        auto type_info = output_tensors[0].GetTensorTypeAndShapeInfo();
-        int64_t output_count = type_info.GetElementCount();
+        // 4. 解析输出
+        I3DOutput result;
+        
+        // 解析第一个输出: features (1024维)
+        float* feat_ptr = output_tensors[0].GetTensorMutableData<float>();
+        auto feat_info = output_tensors[0].GetTensorTypeAndShapeInfo();
+        result.features.assign(feat_ptr, feat_ptr + feat_info.GetElementCount());
 
-        return std::vector<float>(floatarr, floatarr + output_count);
+        // 解析第二个输出: logits (17维)
+        float* logit_ptr = output_tensors[1].GetTensorMutableData<float>();
+        auto logit_info = output_tensors[1].GetTensorTypeAndShapeInfo();
+        result.logits.assign(logit_ptr, logit_ptr + logit_info.GetElementCount());
+
+        return result;
 
     } catch (const Ort::Exception& e) {
         std::cerr << "I3D Run Error: " << e.what() << std::endl;

@@ -228,7 +228,7 @@ std::vector<ActionSegment> Tridet::Run(const std::vector<float>& new_feature, fl
     return detected_actions;
 }
 
-std::vector<ActionSegment> Tridet::RunOffline(const std::vector<std::vector<float>>& all_features, float fps, int chunk_size) {
+std::vector<ActionSegment> Tridet::RunOffline(const std::vector<std::vector<float>>& all_features, float fps, int chunk_size, const std::vector<float>& global_logits) {
     std::vector<ActionSegment> all_proposals;
     if (all_features.empty()) return all_proposals;
     
@@ -320,8 +320,16 @@ std::vector<ActionSegment> Tridet::RunOffline(const std::vector<std::vector<floa
                             ActionSegment seg;
                             seg.start_time = start_time;
                             seg.end_time = end_time;
-                            seg.score = prob;
                             seg.label = c;
+                            
+                            // 执行分值融合 (Score Fusion)
+                            if (!global_logits.empty() && c < global_logits.size()) {
+                                // 公式: sqrt(Prob_TAD * Prob_Global)
+                                seg.score = std::sqrt(prob * global_logits[c]);
+                            } else {
+                                seg.score = prob;
+                            }
+                            
                             all_proposals.push_back(seg);
                         }
                     }

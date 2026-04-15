@@ -6,6 +6,11 @@
 #include <string>
 #include <./service/config.hpp>
 
+struct I3DOutput {
+    std::vector<float> features;
+    std::vector<float> logits;
+};
+
 class I3D {
 public:
     I3D();
@@ -22,9 +27,9 @@ public:
     /**
      * @brief 提取视频序列特征
      * @param frames 输入帧序列 (通常为 16 帧)
-     * @return 提取出的 1024 维特征向量
+     * @return 包含 1024 维特征和 17 维 Logits 的结构体
      */
-    std::vector<float> Run(const std::vector<cv::Mat>& frames);
+    I3DOutput Run(const std::vector<cv::Mat>& frames);
 
 private:
     // ONNX Runtime 相关组件
@@ -34,7 +39,7 @@ private:
 
     // 模型输入输出节点名称
     std::vector<const char*> input_node_names_ = {"input"};
-    std::vector<const char*> output_node_names_ = {"output"};
+    std::vector<const char*> output_node_names_ = {"output", "logits"};
 
     // 输入形状参数
     int64_t batch_size_ = BATCH_SIZE;
