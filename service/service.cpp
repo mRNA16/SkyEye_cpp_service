@@ -530,7 +530,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	ThreadSafeQueue<cv::Mat> display_queue;
 	// 堆开辟200帧空间，溢出以二进制文件存储至磁盘
 	std::string temp_algo_buffer = "algo_buffer_camera_" + camera_id + ".bin";
-	HybridVideoQueue frame_queue(1000, temp_algo_buffer, 448, 448, CV_8UC3);
+	HybridVideoQueue frame_queue(4500, temp_algo_buffer, 448, 448, CV_8UC3);
 	ThreadSafeQueue<std::vector<float>> feature_queue;
 
 	// 启动消费者线程
@@ -651,7 +651,7 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	          << " " << width_ << "x" << height_ << " @ " << fps_ << "fps" << std::endl;
 
 	std::string temp_algo_buffer = "algo_buffer_local_" + session_id + ".bin";
-	HybridVideoQueue frame_queue(1000, temp_algo_buffer, 448, 448, CV_8UC3);
+	HybridVideoQueue frame_queue(4500, temp_algo_buffer, 448, 448, CV_8UC3);
 	ThreadSafeQueue<std::vector<float>> feature_queue;
 
 	// 本地视频无需 live 线程（前端直接用 <video> 播放）
