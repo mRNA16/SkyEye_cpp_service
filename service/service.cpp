@@ -76,14 +76,7 @@ int PilotWebServer::loadModels() {
 	}
 	std::cout << "I3D Model initialized successfully." << std::endl;
 
-	// Load Tridet onnx
-	std::cout << "Loading Tridet Model from: " << TRIDET_MODEL_PATH << std::endl;
-	tridet_model_ = std::make_shared<Tridet>();
-	if (tridet_model_->Init(TRIDET_MODEL_PATH, 0, NUM_CLASSES) != 0) {
-		std::cerr << "Failed to initialize Tridet model!" << std::endl;
-		return -1;
-	}
-	std::cout << "Tridet Model initialized successfully." << std::endl;
+	// Tridet 不在此处初始化：每个 session 在 launch_camera/launch_local_video 中独立创建实例
 
 	return 0;
 }
@@ -492,6 +485,14 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	int session_logits_count = 0;
 	std::mutex session_logits_mtx;
 
+	// 每个 session 独立的 Tridet 实例，避免并发推理时共用同一对象
+	auto session_tridet = std::make_shared<Tridet>();
+	if (session_tridet->Init(TRIDET_MODEL_PATH, 0, NUM_CLASSES) != 0) {
+		std::cerr << "Failed to initialize Tridet model for camera: " << camera_id << std::endl;
+		camera_thread_manager.set(camera_id, false);
+		return -1;
+	}
+
 	cv::VideoCapture cap(rtsp_url, cv::CAP_FFMPEG);
 	if (!cap.isOpened()) {
 		std::cerr << "Failed to open rtsp stream:" << rtsp_url << std::endl;
@@ -540,7 +541,8 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	    std::ref(session_logits_accum), std::ref(session_logits_count), std::ref(session_logits_mtx));
 	std::thread thread_predict(&PilotWebServer::tridet_predict, this,
 	    std::ref(feature_queue), static_cast<float>(fps_), camera_id,
-	    std::ref(session_logits_accum), std::ref(session_logits_count), std::ref(session_logits_mtx));
+	    std::ref(session_logits_accum), std::ref(session_logits_count), std::ref(session_logits_mtx),
+	    session_tridet);
 
 	// 生产者主循环
 	while (camera_thread_manager.get(camera_id)) {
@@ -612,6 +614,14 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	int session_logits_count = 0;
 	std::mutex session_logits_mtx;
 
+	// 每个 session 独立的 Tridet 实例，避免并发推理时共用同一对象
+	auto session_tridet = std::make_shared<Tridet>();
+	if (session_tridet->Init(TRIDET_MODEL_PATH, 0, NUM_CLASSES) != 0) {
+		std::cerr << "[LocalVideo] Failed to initialize Tridet model for session: " << session_id << std::endl;
+		camera_thread_manager.set(session_id, false);
+		return -1;
+	}
+
 	// 用 OpenCV 探测视频元数据（本地文件不需要 rtsp_transport）
 	cv::VideoCapture cap(file_path, cv::CAP_FFMPEG);
 	if (!cap.isOpened()) {
@@ -660,7 +670,8 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	    std::ref(session_logits_accum), std::ref(session_logits_count), std::ref(session_logits_mtx));
 	std::thread thread_predict(&PilotWebServer::tridet_predict, this,
 	    std::ref(feature_queue), static_cast<float>(fps_), session_id,
-	    std::ref(session_logits_accum), std::ref(session_logits_count), std::ref(session_logits_mtx));
+	    std::ref(session_logits_accum), std::ref(session_logits_count), std::ref(session_logits_mtx),
+	    session_tridet);
 
 	// 生产者主循环：读到文件末尾或用户主动停止
 	while (camera_thread_manager.get(session_id)) {
@@ -895,13 +906,14 @@ const std::vector<std::string> ACTION_NAMES = {
 };
 
 int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_queue, float fps, const std::string& camera_id,
-                                   std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx) {
+                                   std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx,
+                                   std::shared_ptr<Tridet> tridet_instance) {
 	// Tridet消费者处理
 	std::vector<float> features;
 	std::vector<std::vector<float>> all_features;
 
 	while (feature_queue.wait_and_pop(features)) {
-		if (!features.empty() && this->tridet_model_) {
+		if (!features.empty() && tridet_instance) {
 			all_features.push_back(features);
 		}
 	}
@@ -921,7 +933,7 @@ int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_
 	}
 
     // 2. 离线使用全特征重叠推理，并进行全局分值融合
-	std::vector<ActionSegment> global_segments = tridet_model_->RunOffline(all_features, static_cast<float>(fps), CHUNK_SIZE, final_global_probs);
+	std::vector<ActionSegment> global_segments = tridet_instance->RunOffline(all_features, static_cast<float>(fps), CHUNK_SIZE, final_global_probs);
 	
 	// 在全部结束后使用全局 1D-IoU NMS 清理同一动作被随着不同窗口预测产生的多重叠碎片
 	std::sort(global_segments.begin(), global_segments.end(), [](const ActionSegment& a, const ActionSegment& b){

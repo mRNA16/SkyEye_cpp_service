@@ -41,7 +41,8 @@ protected:
 	int extract_features(HybridVideoQueue&, ThreadSafeQueue<std::vector<float>>&,
 	                     std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx);
 	int tridet_predict(ThreadSafeQueue<std::vector<float>>&, float, const std::string&,
-	                   std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx);
+	                   std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx,
+	                   std::shared_ptr<Tridet> tridet_instance);
 
 	// WebRTC 相关
 	struct WebRTCSession {
@@ -61,11 +62,11 @@ protected:
 	ThreadSafeDict<std::string, bool> keyframe_requests; // 记录各相机是否需要立即产出关键帧
 	ThreadSafeDict<int, int> GPU_ID_manager;
 
-	// I3D 特征提取模型
+	// I3D 特征提取模型（全局共享，只读推理，线程安全）
 	std::shared_ptr<I3D> i3d_model_;
 
-	// Tridet 时序动作检测模型
-	std::shared_ptr<Tridet> tridet_model_;
+	// Tridet 时序动作检测模型：每个 session 自建实例，不再共享
+	// （移除 tridet_model_ 类成员，见 launch_camera / launch_local_video）
 
 	// 全局分类得分融合（Score Fusion）相关状态已移至 per-session 局部变量
 };
