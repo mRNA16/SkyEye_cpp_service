@@ -26,6 +26,7 @@ int PilotWebServer::boot() {
 	server_.Options("/launch_local_video", cors_options_handler);
 	server_.Options("/offline_camera", cors_options_handler);
 	server_.Options("/get_report", cors_options_handler);
+	server_.Options("/get_live_prediction", cors_options_handler);
 	server_.Options("/webrtc/offer", cors_options_handler);
 
 	// 解决 file:// 协议下的 WebRTC 安全限制：直接通过 http://localhost:8080 访问前端
@@ -158,6 +159,37 @@ int PilotWebServer::set_camera_interface() {
 		} else {
 			response["code"] = 404;
 			response["msg"] = "Report not found or the live stream is still ongoing.";
+		}
+		res.status = 200;
+		res.set_content(response.dump(), "application/json");
+	});
+
+	// 伪在线预测查询：返回当前 session 最新一次 Run() 的结果（仅用于 Log 展示）
+	server_.Post("/get_live_prediction", [this](const httplib::Request& req, httplib::Response& res) {
+		if (WebServerUtils::check_head(req, res)) return;
+		std::vector<std::string> meta_fields = { "camera_id" };
+		if (WebServerUtils::check_field(req, res, meta_fields)) return;
+		json request = json::parse(req.body);
+		std::string camera_id = request["camera_id"];
+
+		json response;
+		std::lock_guard<std::mutex> lk(live_pred_mtx_);
+		auto it = live_predictions_.find(camera_id);
+		if (it != live_predictions_.end() && !it->second.empty()) {
+			json arr = json::array();
+			for (const auto& seg : it->second) {
+				arr.push_back({
+					{"start", seg.start_time},
+					{"end",   seg.end_time},
+					{"label", seg.label},
+					{"score", seg.score}
+				});
+			}
+			response["code"] = 200;
+			response["predictions"] = arr;
+		} else {
+			response["code"] = 404;
+			response["predictions"] = json::array();
 		}
 		res.status = 200;
 		res.set_content(response.dump(), "application/json");
@@ -912,10 +944,28 @@ int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_
 	std::vector<float> features;
 	std::vector<std::vector<float>> all_features;
 
+	// 伪在线预测：每积累 ONLINE_PRED_INTERVAL 个特征触发一次 Run()
+	constexpr int ONLINE_PRED_INTERVAL = 50;
+	int chunk_counter = 0;
+
 	while (feature_queue.wait_and_pop(features)) {
 		if (!features.empty() && tridet_instance) {
 			all_features.push_back(features);
+			++chunk_counter;
+
+			// 每隔 ONLINE_PRED_INTERVAL 个 chunk 做一次在线预测
+			if (chunk_counter % ONLINE_PRED_INTERVAL == 0) {
+				auto online_result = tridet_instance->Run(features, fps, CHUNK_SIZE);
+				std::lock_guard<std::mutex> lk(live_pred_mtx_);
+				live_predictions_[camera_id] = std::move(online_result);
+			}
 		}
+	}
+
+	// 清除在线预测缓存（分析结束后不再对外提供中间结果）
+	{
+		std::lock_guard<std::mutex> lk(live_pred_mtx_);
+		live_predictions_.erase(camera_id);
 	}
 
 	std::cout << "[Tridet Thread] Stream finished. Acquired total feature chunks: " << all_features.size() << ". Generating offline high performance report..." << std::endl;

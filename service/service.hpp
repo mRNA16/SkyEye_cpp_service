@@ -68,6 +68,8 @@ protected:
 	// Tridet 时序动作检测模型：每个 session 自建实例，不再共享
 	// （移除 tridet_model_ 类成员，见 launch_camera / launch_local_video）
 
-	// 全局分类得分融合（Score Fusion）相关状态已移至 per-session 局部变量
+	// 伪在线预测结果：camera_id -> 最新 Run() 输出（仅供 Log 展示，非最终报告）
+	std::mutex live_pred_mtx_;
+	std::map<std::string, std::vector<ActionSegment>> live_predictions_;
 };
 

@@ -808,6 +808,7 @@
 
             // 取消上一次遗留的轮询
             cancelPolling(localReportPollTimer);
+            cancelPolling(localPredPollTimer);
 
             btn.classList.add('loading');
             try {
@@ -822,6 +823,8 @@
                     btn.disabled = true;
                     document.getElementById('btnLocalOffline').disabled = false;
                     appendLocalLog('>>> 后台分析中，完成后将自动通知...');
+                    // 启动伪在线预测轮询
+                    startLivePredPolling(sessionId, appendLocalLog, localPredPollTimer);
                     startReportPolling(sessionId, appendLocalLog, localReportPollTimer, () => {
                         // 分析完成后自动重置按钮状态
                         document.getElementById('btnSendToBackend').disabled = false;
@@ -851,6 +854,8 @@
                     document.getElementById('btnSendToBackend').disabled = false;
                     btn.disabled = true;
                     appendLocalLog('>>> 后台处理中，分析完成后将自动通知...');
+                    // 停止伪在线轮询，启动报告就绪轮询
+                    cancelPolling(localPredPollTimer);
                     startReportPolling(sessionId, appendLocalLog, localReportPollTimer);
                 }
             } catch (e) {
@@ -862,6 +867,56 @@
         // ── 轮询报告就绪 ──────────────────────────────────────────────────────────
         let liveReportPollTimer = { id: null };
         let localReportPollTimer = { id: null };
+
+        // ── 伪在线预测轮询 ────────────────────────────────────────────────────────
+        let livePredPollTimer  = { id: null };
+        let localPredPollTimer = { id: null };
+
+        // 类别标签映射（与 C++ 端 ACTION_CLASSES 顺序一致）
+        const ACTION_LABELS = [
+            '背景', '驾驶杆', '油门杆', '起落架', '减速板', '襟翼',
+            '计算机', '配平轮', '发动机开关', '发动机模式选择', '方向舵配平',
+            'EFIS控制', '速度选择', '航向选择', '高度选择', '垂直速度选择', '自动驾驶'
+        ];
+
+        function startLivePredPolling(cameraId, logFn, timerRef) {
+            cancelPolling(timerRef);
+            const INTERVAL = 10000; // 10 秒轮询一次，低频
+            let lastKey = '';
+
+            function tick() {
+                fetch(`${API_BASE}/get_live_prediction`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify({ camera_id: cameraId })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.code === 200 && data.predictions && data.predictions.length) {
+                        const key = JSON.stringify(data.predictions);
+                        if (key !== lastKey) {
+                            lastKey = key;
+                            // 过滤背景（label=0）并按分数降序取 top-3
+                            const top = data.predictions
+                                .filter(p => p.label !== 0 && p.score >= 0.05)
+                                .sort((a, b) => b.score - a.score)
+                                .slice(0, 3);
+                            if (top.length) {
+                                const txt = top.map(p => {
+                                    const name = ACTION_LABELS[p.label] || `动作#${p.label}`;
+                                    return `${name} ${p.start.toFixed(1)}s-${p.end.toFixed(1)}s (${(p.score * 100).toFixed(0)}%)`;
+                                }).join(' | ');
+                                logFn(`<span style="color:var(--accent-cyan);opacity:0.85;">[预测] ${txt}</span>`);
+                            }
+                        }
+                    }
+                    timerRef.id = setTimeout(tick, INTERVAL);
+                })
+                .catch(() => { timerRef.id = setTimeout(tick, INTERVAL); });
+            }
+
+            timerRef.id = setTimeout(tick, INTERVAL);
+        }
 
         function startReportPolling(cameraId, logFn, timerRef, onReady) {
             const INTERVAL = 4000;
@@ -910,6 +965,7 @@
 
             // 取消上一次遗留的轮询
             cancelPolling(liveReportPollTimer);
+            cancelPolling(livePredPollTimer);
 
             btn.classList.add('loading');
             try {
@@ -924,6 +980,9 @@
                     setStatus(true, "STREAMING & EXTRACTING...");
                     btn.disabled = true;
                     document.getElementById('btnOffline').disabled = false;
+
+                    // 启动伪在线预测轮询
+                    startLivePredPolling(camId, appendLog, livePredPollTimer);
 
                     // 启动 WebRTC
                     startWebRTC(camId);
@@ -953,6 +1012,8 @@
                     document.getElementById('btnLaunch').disabled = false;
                     btn.disabled = true;
                     stopWebRTC();
+                    // 停止伪在线预测轮询，启动报告就绪轮询
+                    cancelPolling(livePredPollTimer);
                     appendLog(">>> 后台 NMS 推理中，分析完成后将自动通知...");
                     startReportPolling(camId, appendLog, liveReportPollTimer);
                 }
