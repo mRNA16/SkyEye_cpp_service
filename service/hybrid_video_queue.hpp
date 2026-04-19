@@ -58,7 +58,7 @@ public:
             file_stream_.write(reinterpret_cast<const char*>(frame.data), frame_size_);
             file_stream_.flush(); // Write to disk directly
             disk_write_idx_++;
-            std::cout << "[FrameQueue]write into binary file" << std::endl;
+            // std::cout << "[FrameQueue]write into binary file" << std::endl;
         }
         cond_var_.notify_one();
     }
@@ -82,7 +82,7 @@ public:
             file_stream_.clear();
             file_stream_.seekg(disk_read_idx_ * frame_size_, std::ios::beg);
             file_stream_.read(reinterpret_cast<char*>(frame.data), frame_size_);
-			std::cout << "[FrameQueue]consume from algo queue!|write_idx:" << disk_write_idx_ << "|read_idx:" << disk_read_idx_ << std::endl;
+			// std::cout << "[FrameQueue]consume from algo queue!|write_idx:" << disk_write_idx_ << "|read_idx:" << disk_read_idx_ << std::endl;
             disk_read_idx_++;
 
             // Reset disk file to save space when empty

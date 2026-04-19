@@ -23,6 +23,7 @@ int PilotWebServer::boot() {
 		res.status = 200;
 	};
 	server_.Options("/launch_camera", cors_options_handler);
+	server_.Options("/launch_local_video", cors_options_handler);
 	server_.Options("/offline_camera", cors_options_handler);
 	server_.Options("/get_report", cors_options_handler);
 	server_.Options("/webrtc/offer", cors_options_handler);
@@ -175,6 +176,30 @@ int PilotWebServer::set_camera_interface() {
 		response["code"] = 200;
 		response["enable_display"] = enable_display_.load();
 		response["msg"] = std::string("Local display ") + (enable_display_ ? "ON" : "OFF");
+		res.set_content(response.dump(), "application/json");
+	});
+
+	server_.Post("/launch_local_video", [this](const httplib::Request& req, httplib::Response& res) {
+		if (WebServerUtils::check_head(req, res)) return;
+		std::vector<std::string> meta_fields = { "session_id", "file_path" };
+		if (WebServerUtils::check_field(req, res, meta_fields)) return;
+		json request = json::parse(req.body);
+		std::string session_id = request["session_id"];
+		std::string file_path  = request["file_path"];
+
+		json response;
+		if (!camera_thread_manager.has(session_id) || camera_thread_manager.get(session_id) == false) {
+			camera_thread_manager.set(session_id, true);
+			std::thread([=]() {
+				launch_local_video(session_id, file_path);
+			}).detach();
+			response["code"] = 200;
+			response["msg"] = "Local video analysis started: " + session_id;
+		} else {
+			response["code"] = 200;
+			response["msg"] = "Session " + session_id + " is already running";
+		}
+		res.status = 200;
 		res.set_content(response.dump(), "application/json");
 	});
 
@@ -462,12 +487,10 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	std::string old_report = "report_" + camera_id + ".json";
 	std::remove(old_report.c_str());
 
-	// 重置全局分类评分累加器，确保每次直播都是独立统计
-	{
-		std::lock_guard<std::mutex> lock(global_logits_mtx_);
-		global_logits_accum_.clear();
-		global_logits_count_ = 0;
-	}
+	// per-session logits 累加器（避免多任务并发时全局状态互相污染）
+	std::vector<float> session_logits_accum;
+	int session_logits_count = 0;
+	std::mutex session_logits_mtx;
 
 	cv::VideoCapture cap(rtsp_url, cv::CAP_FFMPEG);
 	if (!cap.isOpened()) {
@@ -480,7 +503,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	int fps_ = static_cast<int>(cap.get(cv::CAP_PROP_FPS));
 	if (fps_ <= 0 || fps_ > 60) fps_ = 15;
 	cap.release();
-	
+
 	std::ostringstream cmd;
 	cmd << "ffmpeg -loglevel error "
 		<< "-rtsp_transport tcp "
@@ -512,8 +535,12 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 
 	// 启动消费者线程
 	std::thread thread_live(&PilotWebServer::live, this, std::ref(display_queue), camera_id);
-	std::thread thread_extract(&PilotWebServer::extract_features, this, std::ref(frame_queue), std::ref(feature_queue));
-	std::thread thread_predict(&PilotWebServer::tridet_predict, this, std::ref(feature_queue), static_cast<float>(fps_), camera_id);
+	std::thread thread_extract(&PilotWebServer::extract_features, this,
+	    std::ref(frame_queue), std::ref(feature_queue),
+	    std::ref(session_logits_accum), std::ref(session_logits_count), std::ref(session_logits_mtx));
+	std::thread thread_predict(&PilotWebServer::tridet_predict, this,
+	    std::ref(feature_queue), static_cast<float>(fps_), camera_id,
+	    std::ref(session_logits_accum), std::ref(session_logits_count), std::ref(session_logits_mtx));
 
 	// 生产者主循环
 	while (camera_thread_manager.get(camera_id)) {
@@ -522,7 +549,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 			size_t bytes_read = fread(buffer + total_bytes_read, 1, frame_size - total_bytes_read, pipe_in);
 			if (bytes_read == 0) {
 				std::cerr << "Can't read new byte to build a new frame!" << std::endl;
-				break; 
+				break;
 			}
 			total_bytes_read += bytes_read;
 		}
@@ -541,9 +568,9 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 			std::cout << "[Warning] Frame is empty! Skipping..." << std::endl;
 			continue;
 		}
-		
+
 		display_queue.push(input_frame.clone());
-		
+
 		// 调整大小至 448x448 以匹配模型输入并节省内存/磁盘开销
 		cv::Mat resized_frame;
 		cv::resize(input_frame, resized_frame, cv::Size(448, 448), 0, 0, cv::INTER_NEAREST); // 使用最快缩放算法
@@ -551,16 +578,16 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	}
 
 	std::cout << "Waiting for consumers to finish..." << std::endl;
-	
+
 	// 1.停止直播和i3d入口视频帧队列
 	display_queue.stop();
 	frame_queue.stop();
-	
+
 	// 2. 等待直播结束，这个过程会很快
 	if (thread_live.joinable()) thread_live.join();
 	// 3. 等待特征提取线程结束，这个过程慢，磁盘中挤压视频帧很多
 	if (thread_extract.joinable()) thread_extract.join();
-	
+
 	// 4. 特征提取宣告结束，Tridet 消耗完所有的特征后结束
 	feature_queue.stop();
 	if (thread_predict.joinable()) thread_predict.join();
@@ -573,6 +600,110 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 #endif
 	std::cout << "Stream process end" << std::endl;
 
+	return 0;
+}
+
+int PilotWebServer::launch_local_video(const std::string& session_id, const std::string& file_path) {
+	std::string old_report = "report_" + session_id + ".json";
+	std::remove(old_report.c_str());
+
+	// per-session logits 累加器
+	std::vector<float> session_logits_accum;
+	int session_logits_count = 0;
+	std::mutex session_logits_mtx;
+
+	// 用 OpenCV 探测视频元数据（本地文件不需要 rtsp_transport）
+	cv::VideoCapture cap(file_path, cv::CAP_FFMPEG);
+	if (!cap.isOpened()) {
+		std::cerr << "[LocalVideo] Failed to open file: " << file_path << std::endl;
+		camera_thread_manager.set(session_id, false);
+		return -1;
+	}
+	int width_ = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
+	int height_ = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+	int fps_    = static_cast<int>(cap.get(cv::CAP_PROP_FPS));
+	if (fps_ <= 0 || fps_ > 120) fps_ = 30;
+	cap.release();
+
+	// 本地文件 FFmpeg 命令：去掉 -rtsp_transport tcp，直接读文件
+	std::ostringstream cmd;
+	cmd << "ffmpeg -loglevel error "
+	    << "-i \"" << file_path << "\""
+	    << " -f rawvideo -pix_fmt bgr24"
+	    << " -s " << width_ << "x" << height_
+	    << " -r " << fps_
+	    << " pipe:1";
+
+#ifdef _WIN32
+	FILE* pipe_in = _popen(cmd.str().c_str(), "rb");
+#else
+	FILE* pipe_in = popen(cmd.str().c_str(), "r");
+#endif
+	if (!pipe_in) {
+		std::cerr << "[LocalVideo] Failed to open FFmpeg pipe" << std::endl;
+		camera_thread_manager.set(session_id, false);
+		return -1;
+	}
+
+	const size_t frame_size = static_cast<size_t>(width_) * height_ * 3;
+	uchar* buffer = new uchar[frame_size];
+	std::cout << "[LocalVideo] Start processing: " << file_path
+	          << " " << width_ << "x" << height_ << " @ " << fps_ << "fps" << std::endl;
+
+	std::string temp_algo_buffer = "algo_buffer_local_" + session_id + ".bin";
+	HybridVideoQueue frame_queue(1000, temp_algo_buffer, 448, 448, CV_8UC3);
+	ThreadSafeQueue<std::vector<float>> feature_queue;
+
+	// 本地视频无需 live 线程（前端直接用 <video> 播放）
+	std::thread thread_extract(&PilotWebServer::extract_features, this,
+	    std::ref(frame_queue), std::ref(feature_queue),
+	    std::ref(session_logits_accum), std::ref(session_logits_count), std::ref(session_logits_mtx));
+	std::thread thread_predict(&PilotWebServer::tridet_predict, this,
+	    std::ref(feature_queue), static_cast<float>(fps_), session_id,
+	    std::ref(session_logits_accum), std::ref(session_logits_count), std::ref(session_logits_mtx));
+
+	// 生产者主循环：读到文件末尾或用户主动停止
+	while (camera_thread_manager.get(session_id)) {
+		size_t total_bytes_read = 0;
+		while (total_bytes_read < frame_size) {
+			size_t bytes_read = fread(buffer + total_bytes_read, 1, frame_size - total_bytes_read, pipe_in);
+			if (bytes_read == 0) break;
+			total_bytes_read += bytes_read;
+		}
+
+		if (total_bytes_read != frame_size) {
+			// 文件读完或管道出错，正常退出
+			if (feof(pipe_in)) {
+				std::cout << "[LocalVideo] File fully read: " << session_id << std::endl;
+			} else {
+				std::cerr << "[LocalVideo] Pipe read error." << std::endl;
+			}
+			break;
+		}
+
+		cv::Mat input_frame(height_, width_, CV_8UC3, buffer);
+		if (input_frame.empty()) continue;
+
+		cv::Mat resized_frame;
+		cv::resize(input_frame, resized_frame, cv::Size(448, 448), 0, 0, cv::INTER_NEAREST);
+		frame_queue.push(resized_frame);
+	}
+
+	// 停止并等待消费者线程
+	camera_thread_manager.set(session_id, false);
+	frame_queue.stop();
+	if (thread_extract.joinable()) thread_extract.join();
+
+	feature_queue.stop();
+	if (thread_predict.joinable()) thread_predict.join();
+
+	delete[] buffer;
+#ifdef _WIN32
+	if (pipe_in) _pclose(pipe_in);
+#else
+	if (pipe_in) pclose(pipe_in);
+#endif
+	std::cout << "[LocalVideo] Session " << session_id << " finished." << std::endl;
 	return 0;
 }
 
@@ -706,7 +837,8 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 	return 0;
 }
 
-int PilotWebServer::extract_features(HybridVideoQueue& frame_queue,ThreadSafeQueue<std::vector<float>>& feature_queue) {
+int PilotWebServer::extract_features(HybridVideoQueue& frame_queue, ThreadSafeQueue<std::vector<float>>& feature_queue,
+                                     std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx) {
 	// i3d消费者处理
 	cv::Mat frame;
 	std::deque<cv::Mat> local_window_frames;
@@ -717,10 +849,10 @@ int PilotWebServer::extract_features(HybridVideoQueue& frame_queue,ThreadSafeQue
 
 		if (local_window_frames.size() >= CHUNK_SIZE) {
 			std::vector<cv::Mat> infer_frames(local_window_frames.begin(), local_window_frames.begin() + CHUNK_SIZE);
-			
+
 			// 1. 提取双路输出
 			auto output = this->i3d_model_->Run(infer_frames);
-			
+
 			if (!output.features.empty()) {
 				// 2. 特征 L2 归一化 (用于 TriDet 输入)
 				float sum_sq = 0.0f;
@@ -729,11 +861,11 @@ int PilotWebServer::extract_features(HybridVideoQueue& frame_queue,ThreadSafeQue
 				for (float& f : output.features) f /= norm;
 				feature_queue.push(output.features);
 
-				// 3. 累加分类 Logits (用于 Score Fusion)
+				// 3. 累加分类 Logits (用于 Score Fusion)，写入 per-session 累加器
 				if (!output.logits.empty()) {
-					std::lock_guard<std::mutex> lock(global_logits_mtx_);
-					if (global_logits_accum_.empty()) global_logits_accum_.resize(output.logits.size(), 0.0f);
-					
+					std::lock_guard<std::mutex> lock(logits_mtx);
+					if (logits_accum.empty()) logits_accum.resize(output.logits.size(), 0.0f);
+
 					// 执行 Softmax 转换为概率并累加
 					float max_val = *std::max_element(output.logits.begin(), output.logits.end());
 					float exp_sum = 0.0f;
@@ -743,9 +875,9 @@ int PilotWebServer::extract_features(HybridVideoQueue& frame_queue,ThreadSafeQue
 						exp_sum += probs[i];
 					}
 					for(size_t i=0; i<probs.size(); ++i) {
-						global_logits_accum_[i] += (probs[i] / exp_sum);
+						logits_accum[i] += (probs[i] / exp_sum);
 					}
-					global_logits_count_++;
+					logits_count++;
 				}
 			}
 			for (int i = 0; i < 4; ++i) local_window_frames.pop_front();
@@ -762,7 +894,8 @@ const std::vector<std::string> ACTION_NAMES = {
 	"EFISControl", "SpeedSel", "HeadingSel", "AltitudeSel", "VerticalSpeedSel", "AutoPilot"
 };
 
-int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_queue, float fps, const std::string& camera_id) {
+int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_queue, float fps, const std::string& camera_id,
+                                   std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx) {
 	// Tridet消费者处理
 	std::vector<float> features;
 	std::vector<std::vector<float>> all_features;
@@ -772,17 +905,17 @@ int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_
 			all_features.push_back(features);
 		}
 	}
-	
+
 	std::cout << "[Tridet Thread] Stream finished. Acquired total feature chunks: " << all_features.size() << ". Generating offline high performance report..." << std::endl;
-	
-	// 1. 获取并计算全局平均分类分数 (Score Fusion 依据)
+
+	// 1. 获取并计算全局平均分类分数 (Score Fusion 依据)，从 per-session 累加器读取
 	std::vector<float> final_global_probs;
 	{
-		std::lock_guard<std::mutex> lock(global_logits_mtx_);
-		if (global_logits_count_ > 0) {
-			final_global_probs.resize(global_logits_accum_.size());
-			for (size_t i = 0; i < global_logits_accum_.size(); ++i) {
-				final_global_probs[i] = global_logits_accum_[i] / static_cast<float>(global_logits_count_);
+		std::lock_guard<std::mutex> lock(logits_mtx);
+		if (logits_count > 0) {
+			final_global_probs.resize(logits_accum.size());
+			for (size_t i = 0; i < logits_accum.size(); ++i) {
+				final_global_probs[i] = logits_accum[i] / static_cast<float>(logits_count);
 			}
 		}
 	}

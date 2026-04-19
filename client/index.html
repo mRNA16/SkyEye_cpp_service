@@ -744,10 +744,10 @@
 
             btn.classList.add('loading');
             try {
-                const res = await fetch(`${API_BASE}/launch_camera`, {
+                const res = await fetch(`${API_BASE}/launch_local_video`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'text/plain' },
-                    body: JSON.stringify({ camera_id: sessionId, video_url: serverPath })
+                    body: JSON.stringify({ session_id: sessionId, file_path: serverPath })
                 });
                 const data = await res.json();
                 appendLocalLog(`Backend Launch: ${data.msg || (data.code === 200 ? 'Success' : 'Failed')}`);
@@ -777,6 +777,7 @@
                 if (data.code === 200) {
                     document.getElementById('btnSendToBackend').disabled = false;
                     btn.disabled = true;
+                    appendLocalLog('>>> 后台处理中... 完成后点击"获取本地视频检测报告"');
                 }
             } catch (e) {
                 appendLocalLog(`<span style="color:var(--danger-red)">API Error: ${e.message}</span>`);

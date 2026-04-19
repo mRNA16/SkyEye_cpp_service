@@ -36,9 +36,12 @@ protected:
 	int distribute_GPU(int occupy, int design);
 	int cancel_GPU(int gpu_id, int occupy);
 	int launch_camera(const std::string& camera_id,const std::string& input_url);
+	int launch_local_video(const std::string& session_id, const std::string& file_path);
 	int live(ThreadSafeQueue<cv::Mat>&, const std::string&);
-	int extract_features(HybridVideoQueue&,ThreadSafeQueue<std::vector<float>>&);
-	int tridet_predict(ThreadSafeQueue<std::vector<float>>&,float, const std::string&);
+	int extract_features(HybridVideoQueue&, ThreadSafeQueue<std::vector<float>>&,
+	                     std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx);
+	int tridet_predict(ThreadSafeQueue<std::vector<float>>&, float, const std::string&,
+	                   std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx);
 
 	// WebRTC 相关
 	struct WebRTCSession {
@@ -64,9 +67,6 @@ protected:
 	// Tridet 时序动作检测模型
 	std::shared_ptr<Tridet> tridet_model_;
 
-	// 全局分类得分融合（Score Fusion）相关状态
-	std::mutex global_logits_mtx_;
-	std::vector<float> global_logits_accum_;
-	int global_logits_count_ = 0;
+	// 全局分类得分融合（Score Fusion）相关状态已移至 per-session 局部变量
 };
 
