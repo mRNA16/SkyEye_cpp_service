@@ -542,7 +542,7 @@
                     </button>
                     <button class="btn btn-offline" id="btnOffline" style="flex: 1;" onclick="handleOffline()" disabled>
                         <div class="spinner"></div>
-                        <span>推 出 (Stop)</span>
+                        <span>退 出 (Stop)</span>
                     </button>
                 </div>
 
@@ -576,7 +576,7 @@
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
                     </svg>
                     <div>尚未拉取报告<br><span style="font-size: 13px; opacity: 0.6; font-weight: 400;">请在截断直播并执行完 1D-NMS
-                            提纯后台指令后，点击获取报告查看高能时间轴</span></div>
+                            提纯后台指令后，点击获取报告</span></div>
                 </div>
 
                 <div id="liveCardsContainer"></div>
@@ -624,7 +624,7 @@
                 <div style="display: flex; gap: 12px;">
                     <button class="btn btn-launch" id="btnSendToBackend" style="flex:2;" onclick="handleSendToBackend()">
                         <div class="spinner"></div>
-                        <span>发 送 后 端 (Analyze)</span>
+                        <span>开 始 分 析 (Analyze)</span>
                     </button>
                     <button class="btn btn-offline" id="btnLocalOffline" style="flex:1;" onclick="handleLocalOffline()"
                         disabled>
@@ -806,6 +806,9 @@
 
             if (!serverPath || !sessionId) return alert("Please specify Server Path and Session ID!");
 
+            // 取消上一次遗留的轮询
+            cancelPolling(localReportPollTimer);
+
             btn.classList.add('loading');
             try {
                 const res = await fetch(`${API_BASE}/launch_local_video`, {
@@ -818,6 +821,12 @@
                 if (data.code === 200) {
                     btn.disabled = true;
                     document.getElementById('btnLocalOffline').disabled = false;
+                    appendLocalLog('>>> 后台分析中，完成后将自动通知...');
+                    startReportPolling(sessionId, appendLocalLog, localReportPollTimer, () => {
+                        // 分析完成后自动重置按钮状态
+                        document.getElementById('btnSendToBackend').disabled = false;
+                        document.getElementById('btnLocalOffline').disabled = true;
+                    });
                 }
             } catch (e) {
                 appendLocalLog(`<span style="color:var(--danger-red)">API Error: ${e.message}</span>`);
@@ -841,12 +850,54 @@
                 if (data.code === 200) {
                     document.getElementById('btnSendToBackend').disabled = false;
                     btn.disabled = true;
-                    appendLocalLog('>>> 后台处理中... 完成后点击"获取本地视频检测报告"');
+                    appendLocalLog('>>> 后台处理中，分析完成后将自动通知...');
+                    startReportPolling(sessionId, appendLocalLog, localReportPollTimer);
                 }
             } catch (e) {
                 appendLocalLog(`<span style="color:var(--danger-red)">API Error: ${e.message}</span>`);
             }
             btn.classList.remove('loading');
+        }
+
+        // ── 轮询报告就绪 ──────────────────────────────────────────────────────────
+        let liveReportPollTimer = { id: null };
+        let localReportPollTimer = { id: null };
+
+        function startReportPolling(cameraId, logFn, timerRef, onReady) {
+            const INTERVAL = 4000;
+
+            function tick() {
+                fetch(`${API_BASE}/get_report`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify({ camera_id: cameraId })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.code === 200 && data.data && data.data.actions) {
+                        const count = data.data.actions.length;
+                        logFn(`<span style="color:var(--accent-blue);font-weight:600;">` +
+                              `✔ 分析完成！检测到 ${count} 条动作事件，请点击获取报告查看。` +
+                              `</span>`);
+                        timerRef.id = null;
+                        if (onReady) onReady();
+                    } else {
+                        timerRef.id = setTimeout(tick, INTERVAL);
+                    }
+                })
+                .catch(() => {
+                    timerRef.id = setTimeout(tick, INTERVAL);
+                });
+            }
+
+            timerRef.id = setTimeout(tick, INTERVAL);
+        }
+
+        function cancelPolling(timerRef) {
+            if (timerRef.id) {
+                clearTimeout(timerRef.id);
+                timerRef.id = null;
+            }
         }
 
         // 发起相机提取流请求
@@ -856,6 +907,9 @@
             const btn = document.getElementById('btnLaunch');
 
             if (!camId || !url) return alert("Please specify Camera ID and URL!");
+
+            // 取消上一次遗留的轮询
+            cancelPolling(liveReportPollTimer);
 
             btn.classList.add('loading');
             try {
@@ -899,7 +953,8 @@
                     document.getElementById('btnLaunch').disabled = false;
                     btn.disabled = true;
                     stopWebRTC();
-                    appendLog(">>> 等待 C++ 后台单次极致超长推理并融合成结案 JSON ... 请稍候点击获取报告");
+                    appendLog(">>> 后台 NMS 推理中，分析完成后将自动通知...");
+                    startReportPolling(camId, appendLog, liveReportPollTimer);
                 }
             } catch (e) {
                 appendLog(`<span style="color:var(--danger-red)">API Error (${e.message})</span>`);
