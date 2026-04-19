@@ -343,7 +343,56 @@
             padding: 12px;
             border-radius: 6px;
             min-height: 80px;
+            max-height: 180px;
+            overflow-y: auto;
             word-wrap: break-word;
+        }
+
+        .log-box::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .log-box::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 2px;
+        }
+
+        /* 报告栏标题行（标题 + 关闭按钮） */
+        .report-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border-subtle);
+            margin-bottom: 4px;
+        }
+
+        .report-header-title {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-dim);
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .btn-close-report {
+            background: transparent;
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            color: var(--text-dim);
+            font-size: 11px;
+            font-family: 'JetBrains Mono', monospace;
+            letter-spacing: 1px;
+            padding: 4px 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-close-report:hover {
+            border-color: var(--danger-red);
+            color: var(--danger-red);
+            background: rgba(255, 51, 102, 0.08);
         }
 
         /* ── Tab Bar ── */
@@ -654,14 +703,29 @@
         let localIsPlaying = false;
         let pc = null; // WebRTC PeerConnection
 
+        const LOG_MAX_LINES = 60;
+
         function appendLog(msg) {
             const time = new Date().toLocaleTimeString();
-            logBox.innerHTML = `<div style="margin-bottom: 4px;">[${time}] ${msg}</div>` + logBox.innerHTML;
+            const entry = document.createElement('div');
+            entry.style.marginBottom = '4px';
+            entry.innerHTML = `[${time}] ${msg}`;
+            logBox.insertBefore(entry, logBox.firstChild);
+            // 超出上限时移除最旧的条目
+            while (logBox.childElementCount > LOG_MAX_LINES) {
+                logBox.removeChild(logBox.lastChild);
+            }
         }
 
         function appendLocalLog(msg) {
             const time = new Date().toLocaleTimeString();
-            localLog.innerHTML = `<div style="margin-bottom: 4px;">[${time}] ${msg}</div>` + localLog.innerHTML;
+            const entry = document.createElement('div');
+            entry.style.marginBottom = '4px';
+            entry.innerHTML = `[${time}] ${msg}`;
+            localLog.insertBefore(entry, localLog.firstChild);
+            while (localLog.childElementCount > LOG_MAX_LINES) {
+                localLog.removeChild(localLog.lastChild);
+            }
         }
 
         function setStatus(isActive, text) {
@@ -1009,21 +1073,50 @@
         function renderLiveCards(actions) {
             liveCardsContainer.innerHTML = '';
             if (actions.length === 0) {
-                liveCardsContainer.innerHTML = `<div class="empty-state">本时段未检测 to 任何显式过阈值的控制室操作。</div>`;
+                liveCardsContainer.innerHTML = `<div class="empty-state">本时段未检测到任何显式过阈值的控制室操作。</div>`;
                 return;
             }
-            emptyState.style.display = 'none';
+            // 报告标题行 + 关闭按钮
+            const header = document.createElement('div');
+            header.className = 'report-header';
+            header.innerHTML = `
+                <span class="report-header-title">Detection Report · ${actions.length} events</span>
+                <button class="btn-close-report" onclick="clearLiveReport()">✕ 关闭报告</button>
+            `;
+            liveCardsContainer.appendChild(header);
             actions.forEach((act, i) => liveCardsContainer.appendChild(buildActionCard(act, i)));
+        }
+
+        function clearLiveReport() {
+            liveCardsContainer.innerHTML = '';
+            // 若直播已停止（videoContainer 隐藏），则恢复空状态提示
+            if (videoContainer.style.display === 'none') {
+                emptyState.style.display = 'flex';
+            }
         }
 
         function renderLocalCards(actions) {
             localCardsContainer.innerHTML = '';
             if (actions.length === 0) {
-                localCardsContainer.innerHTML = `<div class="empty-state">本时段未检测 to 任何显式过阈值的控制室操作。</div>`;
+                localCardsContainer.innerHTML = `<div class="empty-state">本时段未检测到任何显式过阈值的控制室操作。</div>`;
                 return;
             }
-            localEmptyState.style.display = 'none';
+            const header = document.createElement('div');
+            header.className = 'report-header';
+            header.innerHTML = `
+                <span class="report-header-title">Detection Report · ${actions.length} events</span>
+                <button class="btn-close-report" onclick="clearLocalReport()">✕ 关闭报告</button>
+            `;
+            localCardsContainer.appendChild(header);
             actions.forEach((act, i) => localCardsContainer.appendChild(buildActionCard(act, i)));
+        }
+
+        function clearLocalReport() {
+            localCardsContainer.innerHTML = '';
+            // 若没有选择文件（视频容器隐藏），则恢复空状态提示
+            if (localVideoContainer.style.display === 'none') {
+                localEmptyState.style.display = 'flex';
+            }
         }
 
         document.addEventListener('DOMContentLoaded', () => {
