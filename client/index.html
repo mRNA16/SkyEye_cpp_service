@@ -345,6 +345,107 @@
             min-height: 80px;
             word-wrap: break-word;
         }
+
+        /* ── Tab Bar ── */
+        .tab-bar {
+            display: flex;
+            gap: 0;
+            padding: 0 40px;
+            background: rgba(6, 9, 19, 0.8);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border-subtle);
+            position: sticky;
+            top: 73px;
+            z-index: 99;
+        }
+
+        .tab-btn {
+            position: relative;
+            padding: 14px 28px;
+            background: transparent;
+            border: none;
+            color: var(--text-dim);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: color 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .tab-btn:hover {
+            color: var(--text-main);
+        }
+
+        .tab-btn--active {
+            color: var(--accent-blue);
+        }
+
+        .tab-indicator {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: var(--accent-blue);
+            box-shadow: 0 0 8px var(--accent-blue);
+            transform: scaleX(0);
+            transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .tab-btn--active .tab-indicator {
+            transform: scaleX(1);
+        }
+
+        .tab-section {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 24px;
+            padding: 32px 40px;
+            flex: 1;
+        }
+
+        .file-input-label {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 12px 16px;
+            color: var(--text-dim);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            min-height: 46px;
+        }
+
+        .file-input-label:hover {
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 2px var(--accent-glow);
+            color: var(--text-main);
+        }
+
+        .file-input-label.has-file {
+            border-color: rgba(0, 229, 255, 0.4);
+            color: var(--text-main);
+        }
+
+        .file-input-icon {
+            flex-shrink: 0;
+            font-size: 16px;
+        }
+
+        main {
+            display: block;
+            padding: 0;
+            flex: 1;
+        }
     </style>
 </head>
 
@@ -358,66 +459,169 @@
         </div>
     </header>
 
-    <main>
-        <!-- 左侧操作台 -->
-        <div class="glass-panel">
-            <h2>Command Console</h2>
+    <nav class="tab-bar" id="tabBar">
+        <button class="tab-btn tab-btn--active" id="tabLive" onclick="switchTab('live')">
+            <span class="tab-indicator"></span>
+            LIVE STREAM
+        </button>
+        <button class="tab-btn" id="tabLocal" onclick="switchTab('local')">
+            <span class="tab-indicator"></span>
+            LOCAL VIDEO
+        </button>
+    </nav>
 
-            <div class="form-group">
-                <label>CAMERA ID / 流追踪编号</label>
-                <input type="text" id="cameraId" value="CAM_TEST_001" placeholder="Enter Camera ID">
-            </div>
+    <main id="appMain">
+        <section id="sectionLive" class="tab-section">
+            <!-- 左侧操作台 -->
+            <div class="glass-panel">
+                <h2>Command Console</h2>
 
-            <div class="form-group">
-                <label>RTSP / VIDEO URL</label>
-                <input type="text" id="videoUrl" value="rtsp://localhost:8554/live" placeholder="rtsp://...">
-            </div>
-
-            <div style="display: flex; gap: 12px; margin-top: 10px;">
-                <button class="btn btn-launch" id="btnLaunch" style="flex: 2;" onclick="handleLaunch()">
-                    <div class="spinner"></div>
-                    <span>启 动 直 播 (Launch)</span>
-                </button>
-                <button class="btn btn-offline" id="btnOffline" style="flex: 1;" onclick="handleOffline()" disabled>
-                    <div class="spinner"></div>
-                    <span>推 出 (Stop)</span>
-                </button>
-            </div>
-
-            <div class="log-box" id="sysLog">
-                > System initialized. Ready to connect C++ Tridet Backend.
-            </div>
-
-            <button class="btn btn-report" id="btnReport" onclick="fetchReport()">
-                <div class="spinner"></div>
-                <span>获取最新动作检测结案报告</span>
-            </button>
-        </div>
-
-        <!-- 右侧大屏可视化 -->
-        <div class="report-section" id="reportSection">
-            <!-- 实时视频监控区 -->
-            <div id="videoContainer"
-                style="width:100%; aspect-ratio: 16/9; background:#000; border-radius:12px; overflow:hidden; border:1px solid var(--border-subtle); margin-bottom:20px; position:relative; display:none;">
-                <video id="liveVideo" autoplay playsinline muted
-                    style="width:100%; height:100%; object-fit: contain;"></video>
-                <div
-                    style="position:absolute; top:12px; left:12px; background:rgba(0,0,0,0.6); padding:4px 10px; border-radius:4px; font-size:12px; color:var(--accent-blue); backdrop-filter:blur(4px); display:flex; align-items:center; gap:6px;">
-                    <span
-                        style="width:8px; height:8px; background:var(--accent-blue); border-radius:50%; box-shadow:0 0 6px var(--accent-blue);"></span>
-                    LIVE WEBRTC
+                <div class="form-group">
+                    <label>CAMERA ID / 流追踪编号</label>
+                    <input type="text" id="cameraId" value="CAM_TEST_001" placeholder="Enter Camera ID">
                 </div>
+
+                <div class="form-group">
+                    <label>RTSP / VIDEO URL</label>
+                    <input type="text" id="videoUrl" value="rtsp://localhost:8554/live" placeholder="rtsp://...">
+                </div>
+
+                <div style="display: flex; gap: 12px; margin-top: 10px;">
+                    <button class="btn btn-launch" id="btnLaunch" style="flex: 2;" onclick="handleLaunch()">
+                        <div class="spinner"></div>
+                        <span>启 动 直 播 (Launch)</span>
+                    </button>
+                    <button class="btn btn-offline" id="btnOffline" style="flex: 1;" onclick="handleOffline()" disabled>
+                        <div class="spinner"></div>
+                        <span>推 出 (Stop)</span>
+                    </button>
+                </div>
+
+                <div class="log-box" id="sysLog">
+                    > System initialized. Ready to connect C++ Tridet Backend.
+                </div>
+
+                <button class="btn btn-report" id="btnReport" onclick="fetchLiveReport()">
+                    <div class="spinner"></div>
+                    <span>获取最新动作检测结案报告</span>
+                </button>
             </div>
 
-            <div class="empty-state" id="emptyState">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
-                </svg>
-                <div>尚未拉取报告<br><span style="font-size: 13px; opacity: 0.6; font-weight: 400;">请在截断直播并执行完 1D-NMS
-                        提纯后台指令后，点击获取报告查看高能时间轴</span></div>
+            <!-- 右侧大屏可视化 -->
+            <div class="report-section" id="liveReportSection">
+                <!-- 实时视频监控区 -->
+                <div id="videoContainer"
+                    style="width:100%; aspect-ratio: 16/9; background:#000; border-radius:12px; overflow:hidden; border:1px solid var(--border-subtle); margin-bottom:20px; position:relative; display:none;">
+                    <video id="liveVideo" autoplay playsinline muted
+                        style="width:100%; height:100%; object-fit: contain;"></video>
+                    <div
+                        style="position:absolute; top:12px; left:12px; background:rgba(0,0,0,0.6); padding:4px 10px; border-radius:4px; font-size:12px; color:var(--accent-blue); backdrop-filter:blur(4px); display:flex; align-items:center; gap:6px;">
+                        <span
+                            style="width:8px; height:8px; background:var(--accent-blue); border-radius:50%; box-shadow:0 0 6px var(--accent-blue);"></span>
+                        LIVE WEBRTC
+                    </div>
+                </div>
+
+                <div class="empty-state" id="emptyState">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+                    </svg>
+                    <div>尚未拉取报告<br><span style="font-size: 13px; opacity: 0.6; font-weight: 400;">请在截断直播并执行完 1D-NMS
+                            提纯后台指令后，点击获取报告查看高能时间轴</span></div>
+                </div>
+
+                <div id="liveCardsContainer"></div>
             </div>
-        </div>
-        </div>
+        </section>
+
+        <!-- ═══════════════ LOCAL VIDEO TAB ═══════════════ -->
+        <section id="sectionLocal" class="tab-section" style="display:none;">
+            <!-- Left: Local Video Control Panel -->
+            <div class="glass-panel" id="localControlPanel">
+                <h2>Local Video Console</h2>
+
+                <!-- File picker -->
+                <div class="form-group">
+                    <label>VIDEO FILE / 本地视频文件</label>
+                    <label class="file-input-label" id="fileInputLabel">
+                        <input type="file" id="localFileInput" accept="video/mp4,video/webm,video/*"
+                            onchange="handleLocalFileSelect(event)" style="display:none;">
+                        <span id="fileInputText">选择视频文件...</span>
+                        <span class="file-input-icon">&#128193;</span>
+                    </label>
+                </div>
+
+                <!-- Playback controls -->
+                <div style="display: flex; gap: 12px; margin-top: 4px;">
+                    <button class="btn btn-launch" id="btnLocalPlay" style="flex:1;" onclick="handleLocalPlayPause()"
+                        disabled>
+                        <div class="spinner"></div>
+                        <span id="localPlayLabel">▶ PLAY</span>
+                    </button>
+                </div>
+
+                <!-- Path input for server-side analysis -->
+                <div class="form-group">
+                    <label>SERVER PATH / 服务端文件路径 (FFmpeg)</label>
+                    <input type="text" id="localServerPath" placeholder="e.g. C:\videos\flight.mp4">
+                </div>
+
+                <!-- Camera ID for local analysis session -->
+                <div class="form-group">
+                    <label>ANALYSIS SESSION ID</label>
+                    <input type="text" id="localCameraId" value="LOCAL_ANALYSIS_001" placeholder="Session identifier">
+                </div>
+
+                <div style="display: flex; gap: 12px;">
+                    <button class="btn btn-launch" id="btnSendToBackend" style="flex:2;" onclick="handleSendToBackend()">
+                        <div class="spinner"></div>
+                        <span>发 送 后 端 (Analyze)</span>
+                    </button>
+                    <button class="btn btn-offline" id="btnLocalOffline" style="flex:1;" onclick="handleLocalOffline()"
+                        disabled>
+                        <div class="spinner"></div>
+                        <span>停 止</span>
+                    </button>
+                </div>
+
+                <div class="log-box" id="localLog">
+                    > Local video module ready.
+                </div>
+
+                <button class="btn btn-report" id="btnLocalReport" onclick="fetchLocalReport()">
+                    <div class="spinner"></div>
+                    <span>获取本地视频检测报告</span>
+                </button>
+            </div>
+
+            <!-- Right: Local Video Player + Report -->
+            <div class="report-section" id="localReportSection">
+                <!-- Native browser video player -->
+                <div id="localVideoContainer"
+                    style="width:100%; aspect-ratio:16/9; background:#000; border-radius:12px; overflow:hidden; border:1px solid var(--border-subtle); margin-bottom:20px; position:relative; display:none;">
+                    <video id="localVideo" controls style="width:100%; height:100%; object-fit:contain;">
+                    </video>
+                    <div
+                        style="position:absolute; top:12px; left:12px; background:rgba(0,0,0,0.6); padding:4px 10px; border-radius:4px; font-size:12px; color:var(--text-dim); backdrop-filter:blur(4px); display:flex; align-items:center; gap:6px;">
+                        <span style="width:8px; height:8px; background:var(--text-dim); border-radius:50%;"></span>
+                        LOCAL FILE
+                    </div>
+                </div>
+
+                <!-- Empty state for local tab -->
+                <div class="empty-state" id="localEmptyState">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path
+                            d="M15 10l4.553-2.069A1 1 0 0 1 21 8.82v6.36a1 1 0 0 1-1.447.89L15 14M3 8a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8z" />
+                    </svg>
+                    <div>选择本地视频文件以开始播放<br><span style="font-size: 13px; opacity: 0.6; font-weight: 400;">支持 MP4 / WebM /
+                            其他浏览器原生支持的格式</span></div>
+                </div>
+
+                <!-- Local analysis report cards appended here -->
+                <div id="localCardsContainer"></div>
+            </div>
+        </section>
     </main>
 
     <script>
@@ -427,16 +631,37 @@
         const logBox = document.getElementById('sysLog');
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
-        const reportSection = document.getElementById('reportSection');
         const liveVideo = document.getElementById('liveVideo');
         const videoContainer = document.getElementById('videoContainer');
         const emptyState = document.getElementById('emptyState');
 
+        // ── New refs for Live tab ──
+        const liveReportSection = document.getElementById('liveReportSection');
+        const liveCardsContainer = document.getElementById('liveCardsContainer');
+
+        // ── New refs for Local tab ──
+        const localLog = document.getElementById('localLog');
+        const localReportSection = document.getElementById('localReportSection');
+        const localCardsContainer = document.getElementById('localCardsContainer');
+        const localVideoEl = document.getElementById('localVideo');
+        const localVideoContainer = document.getElementById('localVideoContainer');
+        const localEmptyState = document.getElementById('localEmptyState');
+
+        // ── New State ──
+        let currentTab = 'live';
+        let localVideoObjectURL = null;
+        let localFileSelected = false;
+        let localIsPlaying = false;
         let pc = null; // WebRTC PeerConnection
 
         function appendLog(msg) {
             const time = new Date().toLocaleTimeString();
             logBox.innerHTML = `<div style="margin-bottom: 4px;">[${time}] ${msg}</div>` + logBox.innerHTML;
+        }
+
+        function appendLocalLog(msg) {
+            const time = new Date().toLocaleTimeString();
+            localLog.innerHTML = `<div style="margin-bottom: 4px;">[${time}] ${msg}</div>` + localLog.innerHTML;
         }
 
         function setStatus(isActive, text) {
@@ -446,6 +671,117 @@
             } else {
                 statusDot.classList.remove('active');
             }
+        }
+
+        function switchTab(tabName) {
+            if (tabName === currentTab) return;
+            currentTab = tabName;
+
+            const sectionLive = document.getElementById('sectionLive');
+            const sectionLocal = document.getElementById('sectionLocal');
+            const tabLiveBtn = document.getElementById('tabLive');
+            const tabLocalBtn = document.getElementById('tabLocal');
+
+            if (tabName === 'live') {
+                sectionLive.style.display = 'grid';
+                sectionLocal.style.display = 'none';
+                tabLiveBtn.classList.add('tab-btn--active');
+                tabLocalBtn.classList.remove('tab-btn--active');
+            } else {
+                sectionLive.style.display = 'none';
+                sectionLocal.style.display = 'grid';
+                tabLiveBtn.classList.remove('tab-btn--active');
+                tabLocalBtn.classList.add('tab-btn--active');
+            }
+        }
+
+        function handleLocalFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            if (localVideoObjectURL) {
+                URL.revokeObjectURL(localVideoObjectURL);
+            }
+
+            localVideoObjectURL = URL.createObjectURL(file);
+            localVideoEl.src = localVideoObjectURL;
+            localVideoEl.load();
+
+            document.getElementById('fileInputText').textContent = file.name;
+            document.getElementById('fileInputLabel').classList.add('has-file');
+            document.getElementById('btnLocalPlay').disabled = false;
+            localFileSelected = true;
+            localIsPlaying = false;
+            document.getElementById('localPlayLabel').textContent = '▶ PLAY';
+
+            localVideoContainer.style.display = 'block';
+            localEmptyState.style.display = 'none';
+
+            appendLocalLog(`File loaded: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+            document.getElementById('localServerPath').placeholder = `e.g. C:\\videos\\${file.name}`;
+        }
+
+        function handleLocalPlayPause() {
+            if (!localFileSelected) return;
+
+            if (localIsPlaying) {
+                localVideoEl.pause();
+                localIsPlaying = false;
+                document.getElementById('localPlayLabel').textContent = '▶ PLAY';
+            } else {
+                localVideoEl.play().catch(e => appendLocalLog(`Play error: ${e.message}`));
+                localIsPlaying = true;
+                document.getElementById('localPlayLabel').textContent = '⏸ PAUSE';
+            }
+        }
+
+        async function handleSendToBackend() {
+            const serverPath = document.getElementById('localServerPath').value.trim();
+            const sessionId = document.getElementById('localCameraId').value.trim();
+            const btn = document.getElementById('btnSendToBackend');
+
+            if (!serverPath || !sessionId) return alert("Please specify Server Path and Session ID!");
+
+            btn.classList.add('loading');
+            try {
+                const res = await fetch(`${API_BASE}/launch_camera`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify({ camera_id: sessionId, video_url: serverPath })
+                });
+                const data = await res.json();
+                appendLocalLog(`Backend Launch: ${data.msg || (data.code === 200 ? 'Success' : 'Failed')}`);
+                if (data.code === 200) {
+                    btn.disabled = true;
+                    document.getElementById('btnLocalOffline').disabled = false;
+                }
+            } catch (e) {
+                appendLocalLog(`<span style="color:var(--danger-red)">API Error: ${e.message}</span>`);
+            }
+            btn.classList.remove('loading');
+        }
+
+        async function handleLocalOffline() {
+            const sessionId = document.getElementById('localCameraId').value.trim();
+            const btn = document.getElementById('btnLocalOffline');
+
+            btn.classList.add('loading');
+            try {
+                const res = await fetch(`${API_BASE}/offline_camera`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify({ camera_id: sessionId })
+                });
+                const data = await res.json();
+                appendLocalLog(`Offline Request: ${data.msg}`);
+                if (data.code === 200) {
+                    document.getElementById('btnSendToBackend').disabled = false;
+                    btn.disabled = true;
+                }
+            } catch (e) {
+                appendLocalLog(`<span style="color:var(--danger-red)">API Error: ${e.message}</span>`);
+            }
+            btn.classList.remove('loading');
         }
 
         // 发起相机提取流请求
@@ -506,13 +842,12 @@
             btn.classList.remove('loading');
         }
 
-        // 拉取离线总结报告大盘
-        async function fetchReport() {
+        async function fetchLiveReport() {
             const camId = document.getElementById('cameraId').value;
             const btn = document.getElementById('btnReport');
 
             btn.classList.add('loading');
-            reportSection.innerHTML = `<div class="empty-state"><div class="spinner" style="display:block;"></div><div>拉取解码报告中...</div></div>`;
+            liveCardsContainer.innerHTML = `<div class="empty-state"><div class="spinner" style="display:block;"></div><div>拉取解码报告中...</div></div>`;
 
             try {
                 const res = await fetch(`${API_BASE}/get_report`, {
@@ -525,17 +860,43 @@
                 if (data.code === 200 && data.data && data.data.actions) {
                     appendLog(`<span style="color:var(--accent-blue)">>>> JSON 捕获！共解析到 ${data.data.actions.length} 条过滤后航空动作！</span>`);
                     setStatus(false, "REPORT GENERATED");
-                    renderCards(data.data.actions);
+                    renderLiveCards(data.data.actions);
                 } else {
                     appendLog(`<span style="color:var(--danger-red)">Result: ${data.msg || '暂无报告生成'}</span>`);
-                    reportSection.innerHTML = `<div class="empty-state">尚未出结果或报告未生成</div>`;
+                    liveCardsContainer.innerHTML = `<div class="empty-state">尚未出结果或报告未生成</div>`;
                 }
             } catch (e) {
                 appendLog(`<span style="color:var(--danger-red)">Fetch Error: ${e.message}</span>`);
-                reportSection.innerHTML = `
-                <div class="empty-state" style="color: var(--danger-red)">
-                    您需要将 C++ 后端在 127.0.0.1:8080 跑起来并允许跨域请求方可调用真实 API。
-                </div>`;
+                liveCardsContainer.innerHTML = `<div class="empty-state" style="color: var(--danger-red)">API连接失败，请确认 C++ 后端在线。</div>`;
+            }
+            btn.classList.remove('loading');
+        }
+
+        async function fetchLocalReport() {
+            const sessionId = document.getElementById('localCameraId').value.trim();
+            const btn = document.getElementById('btnLocalReport');
+
+            btn.classList.add('loading');
+            localCardsContainer.innerHTML = `<div class="empty-state"><div class="spinner" style="display:block;"></div><div>拉取本地视频检测报告...</div></div>`;
+
+            try {
+                const res = await fetch(`${API_BASE}/get_report`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify({ camera_id: sessionId })
+                });
+                const data = await res.json();
+
+                if (data.code === 200 && data.data && data.data.actions) {
+                    appendLocalLog(`>>> 报告捕获！${data.data.actions.length} 条动作事件`);
+                    renderLocalCards(data.data.actions);
+                } else {
+                    appendLocalLog(`<span style="color:var(--danger-red)">Result: ${data.msg || '暂无报告'}</span>`);
+                    localCardsContainer.innerHTML = `<div class="empty-state">尚未出结果或报告未生成</div>`;
+                }
+            } catch (e) {
+                appendLocalLog(`<span style="color:var(--danger-red)">Fetch Error: ${e.message}</span>`);
+                localCardsContainer.innerHTML = `<div class="empty-state" style="color: var(--danger-red)">API连接失败，请确认 C++ 后端在线。</div>`;
             }
             btn.classList.remove('loading');
         }
@@ -550,7 +911,6 @@
 
             pc.ontrack = (event) => {
                 appendLog("WebRTC Stream Received! Attaching to player...");
-                appendLog(`ontrack: streams=${event.streams ? event.streams.length : 0}, kind=${event.track?.kind}, readyState=${event.track?.readyState}`);
                 if (event.streams && event.streams[0]) {
                     liveVideo.srcObject = event.streams[0];
                 } else {
@@ -563,20 +923,8 @@
                 liveVideo.play().catch((e) => { appendLog(`video.play() rejected: ${e.message}`); });
             };
 
-            liveVideo.onloadedmetadata = () => {
-                appendLog(`video metadata loaded: ${liveVideo.videoWidth}x${liveVideo.videoHeight}`);
-            };
-            liveVideo.onloadeddata = () => appendLog("video data loaded (first frame arrived)");
-            liveVideo.onplaying = () => appendLog("video starts playing");
-            liveVideo.onresize = () => appendLog(`video resized to: ${liveVideo.videoWidth}x${liveVideo.videoHeight}`);
-            liveVideo.onerror = (e) => appendLog(`video error: ${e?.message || 'unknown error code ' + liveVideo.error?.code}`);
-
             pc.onconnectionstatechange = () => {
                 appendLog(`PeerConnection State: <b>${pc.connectionState}</b>`);
-            };
-
-            pc.oniceconnectionstatechange = () => {
-                appendLog(`ICE Connection State: <b>${pc.iceConnectionState}</b>`);
             };
 
             let sdpSent = false;
@@ -584,7 +932,6 @@
                 if (sdpSent) return;
                 sdpSent = true;
                 const offer = pc.localDescription;
-                appendLog("ICE Gathering Complete. Sending Offer to C++...");
 
                 try {
                     const res = await fetch(`${API_BASE}/webrtc/offer`, {
@@ -597,7 +944,6 @@
                     });
                     const data = await res.json();
                     if (data.sdp) {
-                        appendLog("SDP Answer Received! Negotiating...");
                         await pc.setRemoteDescription(new RTCSessionDescription({
                             type: 'answer',
                             sdp: data.sdp
@@ -608,31 +954,19 @@
                 }
             };
 
-            pc.onicecandidate = (event) => {
-                if (event.candidate) {
-                    appendLog(`[Local Browser Candidate]: ${event.candidate.candidate}`);
-                }
-            };
-
             pc.onicegatheringstatechange = () => {
-                appendLog(`ICE Gathering: <b>${pc.iceGatheringState}</b>`);
                 if (pc.iceGatheringState === 'complete') {
                     sendOffer();
                 }
             };
 
-            // 创建 ReceiveOnly 的收发器
             pc.addTransceiver('video', { direction: 'recvonly' });
 
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
 
-            // 增加超时保护到 15 秒
             setTimeout(() => {
-                if (!sdpSent) {
-                    appendLog("ICE Gathering Timeout, forcing offer send...");
-                    sendOffer();
-                }
+                if (!sdpSent) sendOffer();
             }, 15000);
         }
 
@@ -645,42 +979,67 @@
             emptyState.style.display = 'flex';
         }
 
-        // 以瀑布流方式在前端卡片中渲染报告数据
-        function renderCards(actions) {
-            reportSection.innerHTML = '';
+        function buildActionCard(act, index) {
+            const delay = index * 0.08;
+            const startStr = Number(act.start).toFixed(2) + "s";
+            const endStr = Number(act.end).toFixed(2) + "s";
+            const scoreStr = Number(act.score).toFixed(3);
+            let isWarning = act.action.includes("SpeedBrakes") || act.action.includes("AlartLight");
+            let bderColor = isWarning ? 'var(--danger-red)' : 'var(--accent-blue)';
+
+            const card = document.createElement('div');
+            card.className = 'action-card';
+            card.style.animationDelay = `${delay}s`;
+            card.style.borderLeftColor = bderColor;
+
+            card.innerHTML = `
+                <div class="action-info">
+                    <div class="action-name">${act.action}</div>
+                    <div class="action-time">Timeline: [ ${startStr} — ${endStr} ]</div>
+                </div>
+                <div class="action-score">
+                    <div class="score-val">${scoreStr}</div>
+                    <div class="score-label">Confidence</div>
+                </div>
+            `;
+            return card;
+        }
+
+        function renderLiveCards(actions) {
+            liveCardsContainer.innerHTML = '';
             if (actions.length === 0) {
-                reportSection.innerHTML = `<div class="empty-state">本时段未检测到任何显式过阈值的控制室操作。</div>`;
+                liveCardsContainer.innerHTML = `<div class="empty-state">本时段未检测 to 任何显式过阈值的控制室操作。</div>`;
                 return;
             }
-
-            actions.forEach((act, index) => {
-                const delay = index * 0.08; // 产生递进动画渲染视觉
-                const startStr = Number(act.start).toFixed(2) + "s";
-                const endStr = Number(act.end).toFixed(2) + "s";
-                const scoreStr = Number(act.score).toFixed(3);
-
-                // 某些特别的危险动作标红处理
-                let isWarning = act.action.includes("SpeedBrakes") || act.action.includes("AlartLight");
-                let bderColor = isWarning ? 'var(--danger-red)' : 'var(--accent-blue)';
-
-                const card = document.createElement('div');
-                card.className = 'action-card';
-                card.style.animationDelay = `${delay}s`;
-                card.style.borderLeftColor = bderColor;
-
-                card.innerHTML = `
-                    <div class="action-info">
-                        <div class="action-name">${act.action}</div>
-                        <div class="action-time">Timeline: [ ${startStr} — ${endStr} ]</div>
-                    </div>
-                    <div class="action-score">
-                        <div class="score-val">${scoreStr}</div>
-                        <div class="score-label">Confidence</div>
-                    </div>
-                `;
-                reportSection.appendChild(card);
-            });
+            emptyState.style.display = 'none';
+            actions.forEach((act, i) => liveCardsContainer.appendChild(buildActionCard(act, i)));
         }
+
+        function renderLocalCards(actions) {
+            localCardsContainer.innerHTML = '';
+            if (actions.length === 0) {
+                localCardsContainer.innerHTML = `<div class="empty-state">本时段未检测 to 任何显式过阈值的控制室操作。</div>`;
+                return;
+            }
+            localEmptyState.style.display = 'none';
+            actions.forEach((act, i) => localCardsContainer.appendChild(buildActionCard(act, i)));
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            localVideoEl.addEventListener('ended', () => {
+                localIsPlaying = false;
+                document.getElementById('localPlayLabel').textContent = '▶ PLAY';
+                appendLocalLog('Playback finished.');
+            });
+            localVideoEl.addEventListener('play', () => {
+                localIsPlaying = true;
+                document.getElementById('localPlayLabel').textContent = '⏸ PAUSE';
+            });
+            localVideoEl.addEventListener('pause', () => {
+                localIsPlaying = false;
+                document.getElementById('localPlayLabel').textContent = '▶ PLAY';
+            });
+        });
     </script>
 </body>
 
