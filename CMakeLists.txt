@@ -36,11 +36,13 @@ set(COMMON_SOURCES
     "utils/H264Encoder.cpp"
     "feature/feature.cpp"
     "feature/tridet.cpp"
+    "yolo/yolo_detector.cpp"
 )
 
 set(APP_SOURCES "service/entry.cpp" ${COMMON_SOURCES})
 set(TEST_SOURCES "test/test_rtspPlay.cpp" ${COMMON_SOURCES})
 set(FEATURE_TEST_SOURCES "test/test_extractFeatures.cpp" ${COMMON_SOURCES})
+set(YOLO_TEST_SOURCES "test/test_yolo.cpp" ${COMMON_SOURCES})
 
 # 收集所有头文件
 file(GLOB_RECURSE HEADER_FILES "service/*.hpp" "service/*.h" "utils/*.h" "feature/*.hpp")
@@ -87,6 +89,12 @@ set_target_properties(TestFeatures PROPERTIES OUTPUT_NAME "test_extractFeatures"
 target_include_directories(TestFeatures PUBLIC ${ALL_INCLUDES})
 target_link_libraries(TestFeatures PRIVATE ${ALL_LIBS})
 
+# YOLO 测试程序
+add_executable(TestYolo ${YOLO_TEST_SOURCES} ${HEADER_FILES})
+set_target_properties(TestYolo PROPERTIES OUTPUT_NAME "test_yolo")
+target_include_directories(TestYolo PUBLIC ${ALL_INCLUDES})
+target_link_libraries(TestYolo PRIVATE ${ALL_LIBS})
+
 # 自动拷贝DLL
 set(ORT_DLLS 
     "${ORT_DIR}/lib/onnxruntime.dll"
@@ -96,7 +104,7 @@ set(ORT_DLLS
     $<$<NOT:$<CONFIG:Debug>>:D:/vcpkg/installed/x64-windows/bin/datachannel.dll>
 )
 
-foreach(target PilotApp Tst TestFeatures)
+foreach(target PilotApp Tst TestFeatures TestYolo)
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${ORT_DLLS}

@@ -17,3 +17,5 @@
 /*.zip
 /algos
 /actionformer_release
+/ultralytics
+/yolo/config/best.onnx
