@@ -15,7 +15,10 @@ using json = nlohmann::json;
 
 int PilotWebServer::boot() {
 	std::cout << "PilotWebServer Init..." << std::endl;
-	loadModels();
+	if (loadModels() != 0) {
+		std::cerr << "PilotWebServer boot aborted: required models failed to initialize." << std::endl;
+		return -1;
+	}
 	set_server_logger();
 	
 	// 分别显式注册三个路径的 OPTIONS 预检请求（解决部分 httplib 版本正则通配失败的跨域问题）
@@ -511,6 +514,11 @@ int PilotWebServer::set_camera_interface() {
 			res.set_content(response.dump(), "text/plain");
 		} else {
 			std::cerr << "[WebRTC] ICE Gathering TIMEOUT for " << camera_id << std::endl;
+			{
+				std::lock_guard<std::mutex> lock(sessions_mtx);
+				auto& sessions = webrtc_sessions[camera_id];
+				sessions.erase(std::remove(sessions.begin(), sessions.end(), session), sessions.end());
+			}
 			res.status = 500;
 			res.set_content("ICE Gathering Timeout", "text/plain");
 		}
@@ -565,6 +573,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 #endif
 	if (!pipe_in) {
 		std::cerr << "Failed to open FFmpeg pipe" << std::endl;
+		camera_thread_manager.set(camera_id, false);
 		return -1;
 	}
 

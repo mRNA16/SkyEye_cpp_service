@@ -653,7 +653,7 @@
                     <div
                         style="position:absolute; top:12px; left:12px; background:rgba(0,0,0,0.6); padding:4px 10px; border-radius:4px; font-size:12px; color:var(--text-dim); backdrop-filter:blur(4px); display:flex; align-items:center; gap:6px;">
                         <span style="width:8px; height:8px; background:var(--text-dim); border-radius:50%;"></span>
-                        LOCAL / YOLO
+                        <span id="localVideoBadgeText">LOCAL FILE</span>
                     </div>
                 </div>
 
@@ -824,6 +824,7 @@
                     btn.disabled = true;
                     document.getElementById('btnLocalOffline').disabled = false;
                     appendLocalLog('>>> 后台分析中，完成后将自动通知...');
+                    document.getElementById('localVideoBadgeText').textContent = 'LOCAL / YOLO';
                     startWebRTC(sessionId, {
                         videoEl: localVideoEl,
                         containerEl: localVideoContainer,
@@ -928,6 +929,7 @@
         }
 
         function startReportPolling(cameraId, logFn, timerRef, onReady) {
+            cancelPolling(timerRef);
             const INTERVAL = 4000;
 
             function tick() {
@@ -1106,6 +1108,9 @@
             const pcName = options.pcName || 'live';
 
             stopWebRTC(pcName);
+            if (pcName === 'local') {
+                document.getElementById('localVideoBadgeText').textContent = 'LOCAL / YOLO';
+            }
             logFn("Initializing WebRTC Handshake...");
 
             const pc = new RTCPeerConnection({
@@ -1196,6 +1201,19 @@
             if (pcName === 'live') {
                 targetContainer.style.display = 'none';
                 targetEmpty.style.display = 'flex';
+            } else {
+                document.getElementById('localVideoBadgeText').textContent = 'LOCAL FILE';
+                if (localVideoObjectURL) {
+                    targetVideo.src = localVideoObjectURL;
+                    targetVideo.load();
+                    targetContainer.style.display = 'block';
+                    targetEmpty.style.display = 'none';
+                    localIsPlaying = false;
+                    document.getElementById('localPlayLabel').textContent = '▶ PLAY';
+                } else {
+                    targetContainer.style.display = 'none';
+                    targetEmpty.style.display = 'flex';
+                }
             }
         }
 
