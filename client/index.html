@@ -653,7 +653,7 @@
                     <div
                         style="position:absolute; top:12px; left:12px; background:rgba(0,0,0,0.6); padding:4px 10px; border-radius:4px; font-size:12px; color:var(--text-dim); backdrop-filter:blur(4px); display:flex; align-items:center; gap:6px;">
                         <span style="width:8px; height:8px; background:var(--text-dim); border-radius:50%;"></span>
-                        LOCAL FILE
+                        LOCAL / YOLO
                     </div>
                 </div>
 
@@ -701,7 +701,8 @@
         let localVideoObjectURL = null;
         let localFileSelected = false;
         let localIsPlaying = false;
-        let pc = null; // WebRTC PeerConnection
+        let livePc = null;  // WebRTC PeerConnection for live stream
+        let localPc = null; // WebRTC PeerConnection for local annotated stream
 
         const LOG_MAX_LINES = 60;
 
@@ -823,6 +824,13 @@
                     btn.disabled = true;
                     document.getElementById('btnLocalOffline').disabled = false;
                     appendLocalLog('>>> 后台分析中，完成后将自动通知...');
+                    startWebRTC(sessionId, {
+                        videoEl: localVideoEl,
+                        containerEl: localVideoContainer,
+                        emptyEl: localEmptyState,
+                        logFn: appendLocalLog,
+                        pcName: 'local'
+                    });
                     // 启动伪在线预测轮询
                     startLivePredPolling(sessionId, appendLocalLog, localPredPollTimer);
                     startReportPolling(sessionId, appendLocalLog, localReportPollTimer, () => {
@@ -853,6 +861,7 @@
                 if (data.code === 200) {
                     document.getElementById('btnSendToBackend').disabled = false;
                     btn.disabled = true;
+                    stopWebRTC('local');
                     appendLocalLog('>>> 后台处理中，分析完成后将自动通知...');
                     // 停止伪在线轮询，启动报告就绪轮询
                     cancelPolling(localPredPollTimer);
@@ -985,7 +994,13 @@
                     startLivePredPolling(camId, appendLog, livePredPollTimer);
 
                     // 启动 WebRTC
-                    startWebRTC(camId);
+                    startWebRTC(camId, {
+                        videoEl: liveVideo,
+                        containerEl: videoContainer,
+                        emptyEl: emptyState,
+                        logFn: appendLog,
+                        pcName: 'live'
+                    });
                 }
             } catch (e) {
                 appendLog(`<span style="color:var(--danger-red)">API Error: C++ 服务未响应 (${e.message})</span>`);
@@ -1011,7 +1026,7 @@
                     setStatus(false, "OFFLINE / PROCESSING NMS");
                     document.getElementById('btnLaunch').disabled = false;
                     btn.disabled = true;
-                    stopWebRTC();
+                    stopWebRTC('live');
                     // 停止伪在线预测轮询，启动报告就绪轮询
                     cancelPolling(livePredPollTimer);
                     appendLog(">>> 后台 NMS 推理中，分析完成后将自动通知...");
@@ -1083,29 +1098,41 @@
         }
 
         // WebRTC 核心逻辑
-        async function startWebRTC(camera_id) {
-            appendLog("Initializing WebRTC Handshake...");
+        async function startWebRTC(camera_id, options = {}) {
+            const videoEl = options.videoEl || liveVideo;
+            const containerEl = options.containerEl || videoContainer;
+            const emptyEl = options.emptyEl || emptyState;
+            const logFn = options.logFn || appendLog;
+            const pcName = options.pcName || 'live';
 
-            pc = new RTCPeerConnection({
+            stopWebRTC(pcName);
+            logFn("Initializing WebRTC Handshake...");
+
+            const pc = new RTCPeerConnection({
                 iceServers: [] // 本地调试优先禁用外部 STUN
             });
+            if (pcName === 'local') {
+                localPc = pc;
+            } else {
+                livePc = pc;
+            }
 
             pc.ontrack = (event) => {
-                appendLog("WebRTC Stream Received! Attaching to player...");
+                logFn("WebRTC Stream Received! Attaching to player...");
                 if (event.streams && event.streams[0]) {
-                    liveVideo.srcObject = event.streams[0];
+                    videoEl.srcObject = event.streams[0];
                 } else {
                     let inboundStream = new MediaStream();
                     inboundStream.addTrack(event.track);
-                    liveVideo.srcObject = inboundStream;
+                    videoEl.srcObject = inboundStream;
                 }
-                videoContainer.style.display = 'block';
-                emptyState.style.display = 'none';
-                liveVideo.play().catch((e) => { appendLog(`video.play() rejected: ${e.message}`); });
+                containerEl.style.display = 'block';
+                emptyEl.style.display = 'none';
+                videoEl.play().catch((e) => { logFn(`video.play() rejected: ${e.message}`); });
             };
 
             pc.onconnectionstatechange = () => {
-                appendLog(`PeerConnection State: <b>${pc.connectionState}</b>`);
+                logFn(`PeerConnection State: <b>${pc.connectionState}</b>`);
             };
 
             let sdpSent = false;
@@ -1131,7 +1158,7 @@
                         }));
                     }
                 } catch (err) {
-                    appendLog(`<span style="color:var(--danger-red)">WebRTC Fetch Error: ${err.message}</span>`);
+                    logFn(`<span style="color:var(--danger-red)">WebRTC Fetch Error: ${err.message}</span>`);
                 }
             };
 
@@ -1151,13 +1178,25 @@
             }, 15000);
         }
 
-        function stopWebRTC() {
-            if (pc) {
-                pc.close();
-                pc = null;
+        function stopWebRTC(pcName = 'live') {
+            const targetPc = pcName === 'local' ? localPc : livePc;
+            const targetVideo = pcName === 'local' ? localVideoEl : liveVideo;
+            const targetContainer = pcName === 'local' ? localVideoContainer : videoContainer;
+            const targetEmpty = pcName === 'local' ? localEmptyState : emptyState;
+
+            if (targetPc) {
+                targetPc.close();
+                if (pcName === 'local') {
+                    localPc = null;
+                } else {
+                    livePc = null;
+                }
             }
-            videoContainer.style.display = 'none';
-            emptyState.style.display = 'flex';
+            targetVideo.srcObject = null;
+            if (pcName === 'live') {
+                targetContainer.style.display = 'none';
+                targetEmpty.style.display = 'flex';
+            }
         }
 
         function buildActionCard(act, index) {

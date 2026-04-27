@@ -7,6 +7,9 @@
 #include <vector>
 #include <mutex>
 #include <future>
+#include <iomanip>
+#include <algorithm>
+#include <fstream>
 
 using json = nlohmann::json;
 
@@ -76,6 +79,15 @@ int PilotWebServer::loadModels() {
 		return -1;
 	}
 	std::cout << "I3D Model initialized successfully." << std::endl;
+
+	std::cout << "Loading YOLO Model from: " << YOLO_MODEL_PATH << std::endl;
+	yolo_model_ = std::make_shared<YoloPoseDetector>();
+	if (yolo_model_->Init(YOLO_MODEL_PATH, 0, YOLO_CONF_THRESHOLD, YOLO_NMS_THRESHOLD) != 0) {
+		std::cerr << "Failed to initialize YOLO model, video overlay will be disabled." << std::endl;
+		yolo_model_.reset();
+	} else {
+		std::cout << "YOLO Model initialized successfully." << std::endl;
+	}
 
 	// Tridet 不在此处初始化：每个 session 在 launch_camera/launch_local_video 中独立创建实例
 
@@ -670,6 +682,7 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	// 本地文件 FFmpeg 命令：去掉 -rtsp_transport tcp，直接读文件
 	std::ostringstream cmd;
 	cmd << "ffmpeg -loglevel error "
+	    << "-re "
 	    << "-i \"" << file_path << "\""
 	    << " -f rawvideo -pix_fmt bgr24"
 	    << " -s " << width_ << "x" << height_
@@ -695,8 +708,10 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	std::string temp_algo_buffer = "algo_buffer_local_" + session_id + ".bin";
 	HybridVideoQueue frame_queue(4500, temp_algo_buffer, 448, 448, CV_8UC3);
 	ThreadSafeQueue<std::vector<float>> feature_queue;
+	ThreadSafeQueue<cv::Mat> display_queue;
 
-	// 本地视频无需 live 线程（前端直接用 <video> 播放）
+	// 本地视频也走 WebRTC 显示链路，前端可看到后端绘制的 YOLO 检测框。
+	std::thread thread_live(&PilotWebServer::live, this, std::ref(display_queue), session_id);
 	std::thread thread_extract(&PilotWebServer::extract_features, this,
 	    std::ref(frame_queue), std::ref(feature_queue),
 	    std::ref(session_logits_accum), std::ref(session_logits_count), std::ref(session_logits_mtx));
@@ -727,6 +742,8 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 		cv::Mat input_frame(height_, width_, CV_8UC3, buffer);
 		if (input_frame.empty()) continue;
 
+		display_queue.push(input_frame.clone());
+
 		cv::Mat resized_frame;
 		cv::resize(input_frame, resized_frame, cv::Size(448, 448), 0, 0, cv::INTER_NEAREST);
 		frame_queue.push(resized_frame);
@@ -734,7 +751,9 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 
 	// 停止并等待消费者线程
 	camera_thread_manager.set(session_id, false);
+	display_queue.stop();
 	frame_queue.stop();
+	if (thread_live.joinable()) thread_live.join();
 	if (thread_extract.joinable()) thread_extract.join();
 
 	feature_queue.stop();
@@ -748,6 +767,65 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 #endif
 	std::cout << "[LocalVideo] Session " << session_id << " finished." << std::endl;
 	return 0;
+}
+
+cv::Mat PilotWebServer::draw_yolo_detections(const cv::Mat& frame) {
+	if (frame.empty() || !yolo_model_) {
+		return frame;
+	}
+
+	std::vector<DetectionPose> detections;
+	{
+		std::lock_guard<std::mutex> lock(yolo_mtx_);
+		detections = yolo_model_->Detect(frame);
+	}
+	if (detections.empty()) {
+		return frame;
+	}
+
+	static const std::vector<std::string> labels = {
+		"p1_normal", "p1_grip", "p1_point", "p2_normal", "p2_grip", "p2_point"
+	};
+	static const std::vector<cv::Scalar> colors = {
+		{0, 220, 255}, {0, 180, 80}, {255, 180, 0},
+		{255, 80, 160}, {120, 220, 80}, {80, 140, 255}
+	};
+
+	cv::Mat output = frame.clone();
+	for (const auto& det : detections) {
+		const cv::Scalar color = colors[static_cast<size_t>(std::max(det.label, 0)) % colors.size()];
+		cv::rectangle(output, det.box, color, 2, cv::LINE_AA);
+
+		std::ostringstream label_stream;
+		if (det.label >= 0 && det.label < static_cast<int>(labels.size())) {
+			label_stream << labels[det.label];
+		} else {
+			label_stream << "class_" << det.label;
+		}
+		label_stream << " " << std::fixed << std::setprecision(2) << det.score;
+
+		const std::string label = label_stream.str();
+		int baseline = 0;
+		cv::Size text_size = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.55, 1, &baseline);
+		int text_x = std::max(det.box.x, 0);
+		int text_y = std::max(det.box.y - 6, text_size.height + 4);
+		cv::Rect text_bg(text_x, text_y - text_size.height - 4,
+		                 std::min(text_size.width + 8, output.cols - text_x),
+		                 text_size.height + baseline + 6);
+		if (text_bg.width > 0 && text_bg.height > 0) {
+			cv::rectangle(output, text_bg, color, cv::FILLED);
+		}
+		cv::putText(output, label, cv::Point(text_x + 4, text_y - 4),
+		            cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(10, 10, 10), 1, cv::LINE_AA);
+
+		for (const auto& kpt : det.keypoints) {
+			if (kpt.confidence < 0.25f) continue;
+			cv::circle(output, cv::Point(static_cast<int>(kpt.x), static_cast<int>(kpt.y)),
+			           4, color, cv::FILLED, cv::LINE_AA);
+		}
+	}
+
+	return output;
 }
 
 int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::string& camera_id) {
@@ -852,17 +930,25 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 	while (display_queue.wait_and_pop(frame)) {
 		if (frame.empty()) continue;
 
+		bool has_webrtc_clients = false;
+		{
+			std::lock_guard<std::mutex> lock(sessions_mtx);
+			auto it = webrtc_sessions.find(camera_id);
+			has_webrtc_clients = (it != webrtc_sessions.end() && !it->second.empty());
+		}
+		cv::Mat display_frame = (enable_display_ || has_webrtc_clients) ? draw_yolo_detections(frame) : frame;
+
 		// 向编码队列投递帧副本；若队列已满（编码跟不上），丢弃最旧帧保持低延迟
 		// try_push(val, 2) 表示队列超过 2 帧时不入队，防止延迟积累
-		if (!encode_queue.try_push(frame.clone(), 2)) {
+		if (!encode_queue.try_push(display_frame.clone(), 2)) {
 			cv::Mat dummy;
 			encode_queue.try_pop(dummy);            // 弹出最旧帧
-			encode_queue.try_push(frame.clone(), 2); // 压入最新帧
+			encode_queue.try_push(display_frame.clone(), 2); // 压入最新帧
 		}
 
 		// 本地预览：仅在调试显示开关开启时执行，关闭可节省大量 GUI 资源占用
 		if (enable_display_) {
-			cv::imshow("Pilot_" + camera_id, frame);
+			cv::imshow("Pilot_" + camera_id, display_frame);
 			if (cv::waitKey(1) == 27) { // ESC 退出
 				break;
 			}

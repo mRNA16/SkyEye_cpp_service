@@ -15,6 +15,7 @@
 #include "hybrid_video_queue.hpp"
 #include "../feature/feature.hpp"
 #include "../feature/tridet.hpp"
+#include "../yolo/yolo_detector.hpp"
 
 #include <rtc/rtc.hpp>
 #include <memory>
@@ -38,6 +39,7 @@ protected:
 	int launch_camera(const std::string& camera_id,const std::string& input_url);
 	int launch_local_video(const std::string& session_id, const std::string& file_path);
 	int live(ThreadSafeQueue<cv::Mat>&, const std::string&);
+	cv::Mat draw_yolo_detections(const cv::Mat& frame);
 	int extract_features(HybridVideoQueue&, ThreadSafeQueue<std::vector<float>>&,
 	                     std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx);
 	int tridet_predict(ThreadSafeQueue<std::vector<float>>&, float, const std::string&,
@@ -64,6 +66,8 @@ protected:
 
 	// I3D 特征提取模型（全局共享，只读推理，线程安全）
 	std::shared_ptr<I3D> i3d_model_;
+	std::shared_ptr<YoloPoseDetector> yolo_model_;
+	std::mutex yolo_mtx_;
 
 	// Tridet 时序动作检测模型：每个 session 自建实例，不再共享
 	// （移除 tridet_model_ 类成员，见 launch_camera / launch_local_video）

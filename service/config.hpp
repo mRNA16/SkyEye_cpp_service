@@ -19,3 +19,8 @@ const std::string I3D_MODEL_PATH = R"(E:\pilot\i3d\models\a320_new_full.onnx)";
 constexpr int NUM_CLASSES = 17;
 const std::string ACTIONFORMER_MODEL_PATH = R"(E:\pilot\actionformer_release\ckpt\thumos_i3d_tempNew\actionformer_a320.onnx)";
 const std::string TRIDET_MODEL_PATH = R"(E:\pilot\algos\tridet_a320.onnx)";
+
+// YOLO 姿态检测
+const std::string YOLO_MODEL_PATH = R"(E:\pilot\algos\目标检测\best.onnx)";
+constexpr float YOLO_CONF_THRESHOLD = 0.25f;
+constexpr float YOLO_NMS_THRESHOLD = 0.45f;
