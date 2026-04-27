@@ -34,6 +34,7 @@ int PilotWebServer::boot() {
 	server_.Options("/get_report", cors_options_handler);
 	server_.Options("/get_live_prediction", cors_options_handler);
 	server_.Options("/webrtc/offer", cors_options_handler);
+	server_.Options("/toggle_display", cors_options_handler);
 
 	// 解决 file:// 协议下的 WebRTC 安全限制：直接通过 http://localhost:8080 访问前端
 	server_.Get("/", [this](const httplib::Request& req, httplib::Response& res) {
@@ -519,6 +520,7 @@ int PilotWebServer::set_camera_interface() {
 				auto& sessions = webrtc_sessions[camera_id];
 				sessions.erase(std::remove(sessions.begin(), sessions.end(), session), sessions.end());
 			}
+			pc->close();
 			res.status = 500;
 			res.set_content("ICE Gathering Timeout", "text/plain");
 		}
@@ -578,7 +580,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	}
 
 	const size_t frame_size = static_cast<size_t>(width_) * height_ * 3;
-	uchar* buffer = new uchar[frame_size];
+	std::vector<uchar> buffer(frame_size);
 	std::cout << "Start processing the stream: " << width_ << "x" << height_ << " @ " << fps_ << "fps" << std::endl;
 
 	ThreadSafeQueue<cv::Mat> display_queue;
@@ -601,7 +603,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	while (camera_thread_manager.get(camera_id)) {
 		size_t total_bytes_read = 0;
 		while (total_bytes_read < frame_size) {
-			size_t bytes_read = fread(buffer + total_bytes_read, 1, frame_size - total_bytes_read, pipe_in);
+			size_t bytes_read = fread(buffer.data() + total_bytes_read, 1, frame_size - total_bytes_read, pipe_in);
 			if (bytes_read == 0) {
 				std::cerr << "Can't read new byte to build a new frame!" << std::endl;
 				break;
@@ -618,7 +620,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 			break;
 		}
 
-		cv::Mat input_frame(height_, width_, CV_8UC3, buffer);
+		cv::Mat input_frame(height_, width_, CV_8UC3, buffer.data());
 		if (input_frame.empty()) {
 			std::cout << "[Warning] Frame is empty! Skipping..." << std::endl;
 			continue;
@@ -647,7 +649,6 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	feature_queue.stop();
 	if (thread_predict.joinable()) thread_predict.join();
 
-	delete[] buffer;
 #ifdef _WIN32
 	if (pipe_in) _pclose(pipe_in);
 #else
@@ -710,7 +711,7 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	}
 
 	const size_t frame_size = static_cast<size_t>(width_) * height_ * 3;
-	uchar* buffer = new uchar[frame_size];
+	std::vector<uchar> buffer(frame_size);
 	std::cout << "[LocalVideo] Start processing: " << file_path
 	          << " " << width_ << "x" << height_ << " @ " << fps_ << "fps" << std::endl;
 
@@ -733,7 +734,7 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	while (camera_thread_manager.get(session_id)) {
 		size_t total_bytes_read = 0;
 		while (total_bytes_read < frame_size) {
-			size_t bytes_read = fread(buffer + total_bytes_read, 1, frame_size - total_bytes_read, pipe_in);
+			size_t bytes_read = fread(buffer.data() + total_bytes_read, 1, frame_size - total_bytes_read, pipe_in);
 			if (bytes_read == 0) break;
 			total_bytes_read += bytes_read;
 		}
@@ -748,7 +749,7 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 			break;
 		}
 
-		cv::Mat input_frame(height_, width_, CV_8UC3, buffer);
+		cv::Mat input_frame(height_, width_, CV_8UC3, buffer.data());
 		if (input_frame.empty()) continue;
 
 		display_queue.push(input_frame.clone());
@@ -768,7 +769,6 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	feature_queue.stop();
 	if (thread_predict.joinable()) thread_predict.join();
 
-	delete[] buffer;
 #ifdef _WIN32
 	if (pipe_in) _pclose(pipe_in);
 #else

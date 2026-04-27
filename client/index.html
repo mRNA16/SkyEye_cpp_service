@@ -703,6 +703,7 @@
         let localIsPlaying = false;
         let livePc = null;  // WebRTC PeerConnection for live stream
         let localPc = null; // WebRTC PeerConnection for local annotated stream
+        let savedLocalVideoTime = 0; // 发起 WebRTC 前保存本地视频播放进度
 
         const LOG_MAX_LINES = 60;
 
@@ -824,8 +825,7 @@
                     btn.disabled = true;
                     document.getElementById('btnLocalOffline').disabled = false;
                     appendLocalLog('>>> 后台分析中，完成后将自动通知...');
-                    document.getElementById('localVideoBadgeText').textContent = 'LOCAL / YOLO';
-                    startWebRTC(sessionId, {
+                    document.getElementById('localVideoBadgeText').textContent = 'LOCAL / YOLO';\n                    savedLocalVideoTime = localVideoEl.currentTime;\n                    startWebRTC(sessionId, {
                         videoEl: localVideoEl,
                         containerEl: localVideoContainer,
                         emptyEl: localEmptyState,
@@ -1204,7 +1204,12 @@
             } else {
                 document.getElementById('localVideoBadgeText').textContent = 'LOCAL FILE';
                 if (localVideoObjectURL) {
+                    const timeToRestore = savedLocalVideoTime;
                     targetVideo.src = localVideoObjectURL;
+                    targetVideo.addEventListener('loadedmetadata', function onMeta() {
+                        targetVideo.currentTime = timeToRestore;
+                        targetVideo.removeEventListener('loadedmetadata', onMeta);
+                    }, { once: true });
                     targetVideo.load();
                     targetContainer.style.display = 'block';
                     targetEmpty.style.display = 'none';
