@@ -825,7 +825,9 @@
                     btn.disabled = true;
                     document.getElementById('btnLocalOffline').disabled = false;
                     appendLocalLog('>>> 后台分析中，完成后将自动通知...');
-                    document.getElementById('localVideoBadgeText').textContent = 'LOCAL / YOLO';\n                    savedLocalVideoTime = localVideoEl.currentTime;\n                    startWebRTC(sessionId, {
+                    document.getElementById('localVideoBadgeText').textContent = 'LOCAL / YOLO';
+                    savedLocalVideoTime = localVideoEl.currentTime;
+                    startWebRTC(sessionId, {
                         videoEl: localVideoEl,
                         containerEl: localVideoContainer,
                         emptyEl: localEmptyState,
@@ -838,6 +840,12 @@
                         // 分析完成后自动重置按钮状态
                         document.getElementById('btnSendToBackend').disabled = false;
                         document.getElementById('btnLocalOffline').disabled = true;
+                        stopWebRTC('local');
+                    }, () => {
+                        document.getElementById('btnSendToBackend').disabled = false;
+                        document.getElementById('btnLocalOffline').disabled = true;
+                        cancelPolling(localPredPollTimer);
+                        stopWebRTC('local');
                     });
                 }
             } catch (e) {
@@ -860,13 +868,18 @@
                 const data = await res.json();
                 appendLocalLog(`Offline Request: ${data.msg}`);
                 if (data.code === 200) {
-                    document.getElementById('btnSendToBackend').disabled = false;
                     btn.disabled = true;
                     stopWebRTC('local');
                     appendLocalLog('>>> 后台处理中，分析完成后将自动通知...');
                     // 停止伪在线轮询，启动报告就绪轮询
                     cancelPolling(localPredPollTimer);
-                    startReportPolling(sessionId, appendLocalLog, localReportPollTimer);
+                    startReportPolling(sessionId, appendLocalLog, localReportPollTimer, () => {
+                        document.getElementById('btnSendToBackend').disabled = false;
+                        document.getElementById('btnLocalOffline').disabled = true;
+                    }, () => {
+                        document.getElementById('btnSendToBackend').disabled = false;
+                        document.getElementById('btnLocalOffline').disabled = true;
+                    });
                 }
             } catch (e) {
                 appendLocalLog(`<span style="color:var(--danger-red)">API Error: ${e.message}</span>`);
@@ -928,25 +941,57 @@
             timerRef.id = setTimeout(tick, INTERVAL);
         }
 
-        function startReportPolling(cameraId, logFn, timerRef, onReady) {
+        function startReportPolling(cameraId, logFn, timerRef, onReady, onFailed) {
             cancelPolling(timerRef);
             const INTERVAL = 4000;
+            const TIMEOUT_MS = 30 * 60 * 1000;
+            const startedAt = Date.now();
+            let lastStatus = '';
 
             function tick() {
-                fetch(`${API_BASE}/get_report`, {
+                fetch(`${API_BASE}/get_task_status`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'text/plain' },
                     body: JSON.stringify({ camera_id: cameraId })
                 })
                 .then(r => r.json())
                 .then(data => {
-                    if (data.code === 200 && data.data && data.data.actions) {
-                        const count = data.data.actions.length;
-                        logFn(`<span style="color:var(--accent-blue);font-weight:600;">` +
-                              `✔ 分析完成！检测到 ${count} 条动作事件，请点击获取报告查看。` +
-                              `</span>`);
+                    const status = data.status || 'unknown';
+                    if (status !== lastStatus) {
+                        lastStatus = status;
+                        if (status === 'starting' || status === 'running' || status === 'finalizing') {
+                            logFn(`<span style="color:var(--accent-cyan);opacity:0.85;">[状态] ${status}: ${data.msg || ''}</span>`);
+                        }
+                    }
+
+                    if (status === 'completed' && data.has_report) {
+                        fetch(`${API_BASE}/get_report`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'text/plain' },
+                            body: JSON.stringify({ camera_id: cameraId })
+                        })
+                        .then(r => r.json())
+                        .then(report => {
+                            const count = report.code === 200 && report.data && report.data.actions ? report.data.actions.length : 0;
+                            logFn(`<span style="color:var(--accent-blue);font-weight:600;">` +
+                                  `✔ 分析完成！检测到 ${count} 条动作事件，请点击获取报告查看。` +
+                                  `</span>`);
+                            timerRef.id = null;
+                            if (onReady) onReady();
+                        })
+                        .catch(() => {
+                            logFn(`<span style="color:var(--danger-red)">报告读取失败，请手动点击获取报告。</span>`);
+                            timerRef.id = null;
+                            if (onReady) onReady();
+                        });
+                    } else if (status === 'failed' || status === 'stopped') {
+                        logFn(`<span style="color:var(--danger-red)">任务结束：${data.msg || status}</span>`);
                         timerRef.id = null;
-                        if (onReady) onReady();
+                        if (onFailed) onFailed(data);
+                    } else if (status !== 'running' && Date.now() - startedAt > TIMEOUT_MS) {
+                        logFn(`<span style="color:var(--danger-red)">任务等待超时，请检查后端日志。</span>`);
+                        timerRef.id = null;
+                        if (onFailed) onFailed(data);
                     } else {
                         timerRef.id = setTimeout(tick, INTERVAL);
                     }
@@ -1003,6 +1048,19 @@
                         logFn: appendLog,
                         pcName: 'live'
                     });
+                    startReportPolling(camId, appendLog, liveReportPollTimer, () => {
+                        setStatus(false, "REPORT GENERATED");
+                        document.getElementById('btnLaunch').disabled = false;
+                        document.getElementById('btnOffline').disabled = true;
+                        cancelPolling(livePredPollTimer);
+                        stopWebRTC('live');
+                    }, () => {
+                        setStatus(false, "FAILED");
+                        document.getElementById('btnLaunch').disabled = false;
+                        document.getElementById('btnOffline').disabled = true;
+                        cancelPolling(livePredPollTimer);
+                        stopWebRTC('live');
+                    });
                 }
             } catch (e) {
                 appendLog(`<span style="color:var(--danger-red)">API Error: C++ 服务未响应 (${e.message})</span>`);
@@ -1026,13 +1084,20 @@
                 appendLog(`Offline Request: ${data.msg}`);
                 if (data.code === 200) {
                     setStatus(false, "OFFLINE / PROCESSING NMS");
-                    document.getElementById('btnLaunch').disabled = false;
                     btn.disabled = true;
                     stopWebRTC('live');
                     // 停止伪在线预测轮询，启动报告就绪轮询
                     cancelPolling(livePredPollTimer);
                     appendLog(">>> 后台 NMS 推理中，分析完成后将自动通知...");
-                    startReportPolling(camId, appendLog, liveReportPollTimer);
+                    startReportPolling(camId, appendLog, liveReportPollTimer, () => {
+                        setStatus(false, "REPORT GENERATED");
+                        document.getElementById('btnLaunch').disabled = false;
+                        document.getElementById('btnOffline').disabled = true;
+                    }, () => {
+                        setStatus(false, "FAILED");
+                        document.getElementById('btnLaunch').disabled = false;
+                        document.getElementById('btnOffline').disabled = true;
+                    });
                 }
             } catch (e) {
                 appendLog(`<span style="color:var(--danger-red)">API Error (${e.message})</span>`);
@@ -1155,12 +1220,20 @@
                             sdp: offer.sdp
                         })
                     });
-                    const data = await res.json();
+                    const text = await res.text();
+                    let data;
+                    try {
+                        data = JSON.parse(text);
+                    } catch (_) {
+                        throw new Error(text || `HTTP ${res.status}`);
+                    }
                     if (data.sdp) {
                         await pc.setRemoteDescription(new RTCSessionDescription({
                             type: 'answer',
                             sdp: data.sdp
                         }));
+                    } else {
+                        throw new Error(data.msg || 'WebRTC answer missing SDP');
                     }
                 } catch (err) {
                     logFn(`<span style="color:var(--danger-red)">WebRTC Fetch Error: ${err.message}</span>`);

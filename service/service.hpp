@@ -22,6 +22,7 @@
 #include <map>
 #include <mutex>
 #include <future>
+#include <optional>
 
 using json = nlohmann::json;
 
@@ -39,12 +40,15 @@ protected:
 	int launch_camera(const std::string& camera_id,const std::string& input_url);
 	int launch_local_video(const std::string& session_id, const std::string& file_path);
 	int live(ThreadSafeQueue<cv::Mat>&, const std::string&);
-	cv::Mat draw_yolo_detections(const cv::Mat& frame);
+	cv::Mat draw_yolo_detections(const cv::Mat& frame, const std::vector<DetectionPose>& detections);
 	int extract_features(HybridVideoQueue&, ThreadSafeQueue<std::vector<float>>&,
 	                     std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx);
 	int tridet_predict(ThreadSafeQueue<std::vector<float>>&, float, const std::string&,
 	                   std::vector<float>& logits_accum, int& logits_count, std::mutex& logits_mtx,
 	                   std::shared_ptr<Tridet> tridet_instance);
+	void set_task_status(const std::string& camera_id, const std::string& status, const std::string& msg = "");
+	json get_task_status_json(const std::string& camera_id);
+	bool report_exists(const std::string& camera_id) const;
 
 	// WebRTC 相关
 	struct WebRTCSession {
@@ -75,5 +79,12 @@ protected:
 	// 伪在线预测结果：camera_id -> 最新 Run() 输出（仅供 Log 展示，非最终报告）
 	std::mutex live_pred_mtx_;
 	std::map<std::string, std::vector<ActionSegment>> live_predictions_;
+
+	struct TaskStatus {
+		std::string status = "unknown";
+		std::string msg;
+	};
+	std::mutex task_status_mtx_;
+	std::map<std::string, TaskStatus> task_status_;
 };
 

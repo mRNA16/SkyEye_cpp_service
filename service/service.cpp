@@ -10,8 +10,67 @@
 #include <iomanip>
 #include <algorithm>
 #include <fstream>
+#include <cctype>
+#include <cstdio>
 
 using json = nlohmann::json;
+
+namespace {
+std::vector<std::string> SplitSdpLines(const std::string& sdp) {
+	std::vector<std::string> lines;
+	std::string line;
+	std::istringstream iss(sdp);
+	while (std::getline(iss, line)) {
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		lines.push_back(line);
+	}
+	return lines;
+}
+
+std::optional<int> ParseH264PayloadType(const std::string& sdp) {
+	for (const auto& line : SplitSdpLines(sdp)) {
+		const std::string prefix = "a=rtpmap:";
+		if (line.rfind(prefix, 0) != 0) continue;
+
+		size_t pos = prefix.size();
+		size_t end = line.find(' ', pos);
+		if (end == std::string::npos) continue;
+
+		std::string payload = line.substr(pos, end - pos);
+		std::string codec = line.substr(end + 1);
+		std::transform(codec.begin(), codec.end(), codec.begin(),
+			[](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+		if (codec.rfind("H264/", 0) != 0) continue;
+
+		try {
+			int pt = std::stoi(payload);
+			if (pt >= 0 && pt <= 127) return pt;
+		} catch (...) {
+			continue;
+		}
+	}
+	return std::nullopt;
+}
+
+void ReplaceOrInsertFmtp(std::string& sdp, int payload_type) {
+	const std::string fmtp_prefix = "a=fmtp:" + std::to_string(payload_type);
+	const std::string h264_fmtp = fmtp_prefix + " packetization-mode=1;profile-level-id=42001f\r\n";
+	size_t fmtp_pos = sdp.find(fmtp_prefix);
+	if (fmtp_pos != std::string::npos) {
+		size_t line_end = sdp.find('\n', fmtp_pos);
+		if (line_end == std::string::npos) line_end = sdp.size() - 1;
+		sdp.replace(fmtp_pos, line_end - fmtp_pos + 1, h264_fmtp);
+		return;
+	}
+
+	size_t video_m = sdp.find("m=video");
+	if (video_m == std::string::npos) return;
+	size_t nl = sdp.find('\n', video_m);
+	if (nl != std::string::npos) {
+		sdp.insert(nl + 1, h264_fmtp);
+	}
+}
+}
 
 int PilotWebServer::boot() {
 	std::cout << "PilotWebServer Init..." << std::endl;
@@ -33,6 +92,7 @@ int PilotWebServer::boot() {
 	server_.Options("/offline_camera", cors_options_handler);
 	server_.Options("/get_report", cors_options_handler);
 	server_.Options("/get_live_prediction", cors_options_handler);
+	server_.Options("/get_task_status", cors_options_handler);
 	server_.Options("/webrtc/offer", cors_options_handler);
 	server_.Options("/toggle_display", cors_options_handler);
 
@@ -107,6 +167,35 @@ int PilotWebServer::set_server_logger() {
 	return 0;
 }
 
+bool PilotWebServer::report_exists(const std::string& camera_id) const {
+	std::ifstream ifs("report_" + camera_id + ".json");
+	return ifs.good();
+}
+
+void PilotWebServer::set_task_status(const std::string& camera_id, const std::string& status, const std::string& msg) {
+	std::lock_guard<std::mutex> lock(task_status_mtx_);
+	task_status_[camera_id] = TaskStatus{ status, msg };
+}
+
+json PilotWebServer::get_task_status_json(const std::string& camera_id) {
+	json response;
+	response["code"] = 200;
+	response["camera_id"] = camera_id;
+	response["has_report"] = report_exists(camera_id);
+
+	std::lock_guard<std::mutex> lock(task_status_mtx_);
+	auto it = task_status_.find(camera_id);
+	if (it == task_status_.end()) {
+		response["status"] = response["has_report"].get<bool>() ? "completed" : "unknown";
+		response["msg"] = response["has_report"].get<bool>() ? "Report is available." : "Task not found.";
+		return response;
+	}
+
+	response["status"] = it->second.status;
+	response["msg"] = it->second.msg;
+	return response;
+}
+
 int PilotWebServer::set_camera_interface() {
 	server_.Post("/launch_camera", [this](const httplib::Request& req, httplib::Response& res) {
 		if (WebServerUtils::check_head(req, res)) return;
@@ -120,14 +209,17 @@ int PilotWebServer::set_camera_interface() {
 		json response;
 		if (!camera_thread_manager.has(camera_id) || camera_thread_manager.get(camera_id) == false) {
 			camera_thread_manager.set(camera_id, true);
+			set_task_status(camera_id, "starting", "Camera task is starting.");
 			std::thread([=]() {
 				launch_camera(camera_id, rtsp_url);
 			}).detach();
 			response["code"] = 200;
+			response["status"] = "starting";
 			response["msg"] = "Success to launch camera:" + camera_id;
 		}
 		else {
 			response["code"] = 200;
+			response["status"] = "running";
 			response["msg"] = "Camera " + camera_id + "is already launched";
 		}
 		res.status = 200;
@@ -146,11 +238,14 @@ int PilotWebServer::set_camera_interface() {
 			camera_thread_manager.get(camera_id) == true) {
 
 			camera_thread_manager.set(camera_id, false);
+			set_task_status(camera_id, "finalizing", "Stop requested. Final report is being generated.");
 			response["code"] = 200;
+			response["status"] = "finalizing";
 			response["msg"] = "Success to offline camera " + camera_id;
 		}
 		else {
 			response["code"] = 200;
+			response["status"] = get_task_status_json(camera_id).value("status", "unknown");
 			response["msg"] = "There is no online camera " + camera_id;
 		}
 		res.status = 200;
@@ -178,6 +273,17 @@ int PilotWebServer::set_camera_interface() {
 		}
 		res.status = 200;
 		res.set_content(response.dump(), "application/json");
+	});
+
+	server_.Post("/get_task_status", [this](const httplib::Request& req, httplib::Response& res) {
+		if (WebServerUtils::check_head(req, res)) return;
+		std::vector<std::string> meta_fields = { "camera_id" };
+		if (WebServerUtils::check_field(req, res, meta_fields)) return;
+		json request = json::parse(req.body);
+		std::string camera_id = request["camera_id"];
+
+		res.status = 200;
+		res.set_content(get_task_status_json(camera_id).dump(), "application/json");
 	});
 
 	// 伪在线预测查询：返回当前 session 最新一次 Run() 的结果（仅用于 Log 展示）
@@ -231,13 +337,16 @@ int PilotWebServer::set_camera_interface() {
 		json response;
 		if (!camera_thread_manager.has(session_id) || camera_thread_manager.get(session_id) == false) {
 			camera_thread_manager.set(session_id, true);
+			set_task_status(session_id, "starting", "Local video task is starting.");
 			std::thread([=]() {
 				launch_local_video(session_id, file_path);
 			}).detach();
 			response["code"] = 200;
+			response["status"] = "starting";
 			response["msg"] = "Local video analysis started: " + session_id;
 		} else {
 			response["code"] = 200;
+			response["status"] = "running";
 			response["msg"] = "Session " + session_id + " is already running";
 		}
 		res.status = 200;
@@ -262,6 +371,13 @@ int PilotWebServer::set_camera_interface() {
 			res.set_content("Missing camera_id or sdp", "text/plain");
 			return;
 		}
+		auto negotiated_h264_pt = ParseH264PayloadType(sdp);
+		if (!negotiated_h264_pt) {
+			res.status = 400;
+			res.set_content("Browser offer does not include H264 video support", "text/plain");
+			return;
+		}
+		const uint8_t h264_payload_type = static_cast<uint8_t>(*negotiated_h264_pt);
 
 		rtc::Configuration config;
 		// 显式绑定到所有本地接口，解决虚拟网卡导致的路径不可达问题
@@ -365,9 +481,8 @@ int PilotWebServer::set_camera_interface() {
 		});
 
 		constexpr uint32_t SSRC = 42;
-		constexpr uint8_t TARGET_PT = 103; // 使用浏览器已声明支持的 H264 PT
 		auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
-    		SSRC, "video", TARGET_PT, rtc::H264RtpPacketizer::ClockRate
+    		SSRC, "video", h264_payload_type, rtc::H264RtpPacketizer::ClockRate
 		);
 
 		// 切换至 Separator::Length (AVCC 封装)。
@@ -408,11 +523,12 @@ int PilotWebServer::set_camera_interface() {
 				// 构造 AVCC 格式数据包：[4字节长度][NALU载荷][4字节长度][NALU载荷]...
 				std::vector<uint8_t> avcc_buffer;
 				auto flush_nalu = [&](const uint8_t* start, const uint8_t* end) {
-					if (!start || start >= end) return;
+					if (!start || start >= end || end - start < 4) return;
 					// 探测载荷起始位置（跳过 Annex-B 起始码）
 					const uint8_t* payload = start;
-					if (start[2] == 1) payload += 3;
-					else if (start[3] == 1) payload += 4;
+					if (end - start >= 3 && start[0] == 0 && start[1] == 0 && start[2] == 1) payload += 3;
+					else if (end - start >= 4 && start[0] == 0 && start[1] == 0 && start[2] == 0 && start[3] == 1) payload += 4;
+					else return;
 					
 					size_t payload_size = end - payload;
 					if (payload_size == 0) return;
@@ -473,7 +589,7 @@ int PilotWebServer::set_camera_interface() {
 		if (gather_future.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
 			std::string answer_sdp = gather_future.get();
 
-			// 增强型 SDP 处理 (PT 103 协商策略)
+			// 增强型 SDP 处理：使用浏览器 offer 中协商出的 H264 payload type
 			{
 				std::string& sdp = answer_sdp;
 				// 1. 修正 setup 角色为 active (RFC 标准 Answer 必须返回明确角色)
@@ -482,18 +598,7 @@ int PilotWebServer::set_camera_interface() {
 
 				// 2. 强制确保 H.264 的关键参数对齐（注意严格使用 \r\n）
 				// 使用 Constrained Baseline (42e0xx)，这是 WebRTC 厂商支持最好的 Profile
-				std::string h264_fmtp = "a=fmtp:103 packetization-mode=1;profile-level-id=42001f\r\n";
-				size_t fmtp_pos = sdp.find("a=fmtp:103");
-				if (fmtp_pos != std::string::npos) {
-					size_t line_end = sdp.find("\n", fmtp_pos);
-					sdp.replace(fmtp_pos, line_end - fmtp_pos + 1, h264_fmtp);
-				} else {
-					size_t vpos = sdp.find("m=video");
-					if (vpos != std::string::npos) {
-						size_t nl = sdp.find("\n", vpos);
-						sdp.insert(nl + 1, h264_fmtp);
-					}
-				}
+				ReplaceOrInsertFmtp(sdp, static_cast<int>(h264_payload_type));
 
 				// 3. 注入 SSRC 声明 (确保 RTP 发包器 SSRC=42 与 Track 强关联)
 				std::string ssrc_info = "a=ssrc:42 cname:skyeye-video\r\n"
@@ -533,6 +638,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	// 在启动新任务前，先清理可能存在的旧报告文件，防止前端轮询误触
 	std::string old_report = "report_" + camera_id + ".json";
 	std::remove(old_report.c_str());
+	set_task_status(camera_id, "starting", "Initializing camera task.");
 
 	// per-session logits 累加器（避免多任务并发时全局状态互相污染）
 	std::vector<float> session_logits_accum;
@@ -544,6 +650,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	if (session_tridet->Init(TRIDET_MODEL_PATH, 0, NUM_CLASSES) != 0) {
 		std::cerr << "Failed to initialize Tridet model for camera: " << camera_id << std::endl;
 		camera_thread_manager.set(camera_id, false);
+		set_task_status(camera_id, "failed", "Failed to initialize Tridet model.");
 		return -1;
 	}
 
@@ -551,6 +658,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	if (!cap.isOpened()) {
 		std::cerr << "Failed to open rtsp stream:" << rtsp_url << std::endl;
 		camera_thread_manager.set(camera_id, false);
+		set_task_status(camera_id, "failed", "Failed to open RTSP stream.");
 		return -1;
 	}
 	int width_ = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
@@ -576,12 +684,14 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	if (!pipe_in) {
 		std::cerr << "Failed to open FFmpeg pipe" << std::endl;
 		camera_thread_manager.set(camera_id, false);
+		set_task_status(camera_id, "failed", "Failed to open FFmpeg pipe.");
 		return -1;
 	}
 
 	const size_t frame_size = static_cast<size_t>(width_) * height_ * 3;
 	std::vector<uchar> buffer(frame_size);
 	std::cout << "Start processing the stream: " << width_ << "x" << height_ << " @ " << fps_ << "fps" << std::endl;
+	set_task_status(camera_id, "running", "Camera stream is running.");
 
 	ThreadSafeQueue<cv::Mat> display_queue;
 	// 堆开辟200帧空间，溢出以二进制文件存储至磁盘
@@ -600,6 +710,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	    session_tridet);
 
 	// 生产者主循环
+	size_t frame_count = 0;
 	while (camera_thread_manager.get(camera_id)) {
 		size_t total_bytes_read = 0;
 		while (total_bytes_read < frame_size) {
@@ -617,6 +728,9 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 			} else {
 				std::cerr << "Error reading from ffmpeg pipe." << std::endl;
 			}
+			if (frame_count == 0) {
+				set_task_status(camera_id, "failed", "No frames were received from the stream.");
+			}
 			break;
 		}
 
@@ -627,6 +741,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 		}
 
 		display_queue.push(input_frame.clone());
+		++frame_count;
 
 		// 调整大小至 448x448 以匹配模型输入并节省内存/磁盘开销
 		cv::Mat resized_frame;
@@ -635,6 +750,10 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 	}
 
 	std::cout << "Waiting for consumers to finish..." << std::endl;
+	camera_thread_manager.set(camera_id, false);
+	if (frame_count > 0) {
+		set_task_status(camera_id, "finalizing", "Stream ended. Final report is being generated.");
+	}
 
 	// 1.停止直播和i3d入口视频帧队列
 	display_queue.stop();
@@ -662,6 +781,7 @@ int PilotWebServer::launch_camera(const std::string& camera_id, const std::strin
 int PilotWebServer::launch_local_video(const std::string& session_id, const std::string& file_path) {
 	std::string old_report = "report_" + session_id + ".json";
 	std::remove(old_report.c_str());
+	set_task_status(session_id, "starting", "Initializing local video task.");
 
 	// per-session logits 累加器
 	std::vector<float> session_logits_accum;
@@ -673,6 +793,7 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	if (session_tridet->Init(TRIDET_MODEL_PATH, 0, NUM_CLASSES) != 0) {
 		std::cerr << "[LocalVideo] Failed to initialize Tridet model for session: " << session_id << std::endl;
 		camera_thread_manager.set(session_id, false);
+		set_task_status(session_id, "failed", "Failed to initialize Tridet model.");
 		return -1;
 	}
 
@@ -681,6 +802,7 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	if (!cap.isOpened()) {
 		std::cerr << "[LocalVideo] Failed to open file: " << file_path << std::endl;
 		camera_thread_manager.set(session_id, false);
+		set_task_status(session_id, "failed", "Failed to open local video file.");
 		return -1;
 	}
 	int width_ = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
@@ -707,6 +829,7 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	if (!pipe_in) {
 		std::cerr << "[LocalVideo] Failed to open FFmpeg pipe" << std::endl;
 		camera_thread_manager.set(session_id, false);
+		set_task_status(session_id, "failed", "Failed to open FFmpeg pipe.");
 		return -1;
 	}
 
@@ -714,6 +837,7 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	std::vector<uchar> buffer(frame_size);
 	std::cout << "[LocalVideo] Start processing: " << file_path
 	          << " " << width_ << "x" << height_ << " @ " << fps_ << "fps" << std::endl;
+	set_task_status(session_id, "running", "Local video analysis is running.");
 
 	std::string temp_algo_buffer = "algo_buffer_local_" + session_id + ".bin";
 	HybridVideoQueue frame_queue(4500, temp_algo_buffer, 448, 448, CV_8UC3);
@@ -731,6 +855,7 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	    session_tridet);
 
 	// 生产者主循环：读到文件末尾或用户主动停止
+	size_t frame_count = 0;
 	while (camera_thread_manager.get(session_id)) {
 		size_t total_bytes_read = 0;
 		while (total_bytes_read < frame_size) {
@@ -746,6 +871,9 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 			} else {
 				std::cerr << "[LocalVideo] Pipe read error." << std::endl;
 			}
+			if (frame_count == 0) {
+				set_task_status(session_id, "failed", "No frames were decoded from the local video.");
+			}
 			break;
 		}
 
@@ -753,6 +881,7 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 		if (input_frame.empty()) continue;
 
 		display_queue.push(input_frame.clone());
+		++frame_count;
 
 		cv::Mat resized_frame;
 		cv::resize(input_frame, resized_frame, cv::Size(448, 448), 0, 0, cv::INTER_NEAREST);
@@ -761,6 +890,9 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 
 	// 停止并等待消费者线程
 	camera_thread_manager.set(session_id, false);
+	if (frame_count > 0) {
+		set_task_status(session_id, "finalizing", "Video frames processed. Final report is being generated.");
+	}
 	display_queue.stop();
 	frame_queue.stop();
 	if (thread_live.joinable()) thread_live.join();
@@ -778,17 +910,8 @@ int PilotWebServer::launch_local_video(const std::string& session_id, const std:
 	return 0;
 }
 
-cv::Mat PilotWebServer::draw_yolo_detections(const cv::Mat& frame) {
-	if (frame.empty() || !yolo_model_) {
-		return frame;
-	}
-
-	std::vector<DetectionPose> detections;
-	{
-		std::lock_guard<std::mutex> lock(yolo_mtx_);
-		detections = yolo_model_->Detect(frame);
-	}
-	if (detections.empty()) {
+cv::Mat PilotWebServer::draw_yolo_detections(const cv::Mat& frame, const std::vector<DetectionPose>& detections) {
+	if (frame.empty() || detections.empty()) {
 		return frame;
 	}
 
@@ -850,6 +973,27 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 	// ─────────────────────────────────────────────────────────────────────────
 
 	ThreadSafeQueue<cv::Mat> encode_queue;
+	ThreadSafeQueue<cv::Mat> yolo_queue;
+	std::mutex latest_yolo_mtx;
+	std::vector<DetectionPose> latest_detections;
+
+	std::thread yolo_thread([this, &yolo_queue, &latest_yolo_mtx, &latest_detections, &camera_id]() {
+		cv::Mat yolo_frame;
+		while (yolo_queue.wait_and_pop(yolo_frame)) {
+			if (yolo_frame.empty() || !yolo_model_) continue;
+
+			std::vector<DetectionPose> detections;
+			{
+				std::lock_guard<std::mutex> lock(yolo_mtx_);
+				detections = yolo_model_->Detect(yolo_frame);
+			}
+			{
+				std::lock_guard<std::mutex> lock(latest_yolo_mtx);
+				latest_detections = std::move(detections);
+			}
+		}
+		std::cout << "[YoloThread] " << camera_id << " Exit." << std::endl;
+	});
 
 	// ── 编码线程 ──────────────────────────────────────────────────────────────
 	std::thread encode_thread([this, &encode_queue, &camera_id]() {
@@ -936,6 +1080,7 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 
 	// ── 显示线程（当前线程）────────────────────────────────────────────────────
 	cv::Mat frame;
+	size_t frame_idx = 0;
 	while (display_queue.wait_and_pop(frame)) {
 		if (frame.empty()) continue;
 
@@ -945,7 +1090,22 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 			auto it = webrtc_sessions.find(camera_id);
 			has_webrtc_clients = (it != webrtc_sessions.end() && !it->second.empty());
 		}
-		cv::Mat display_frame = (enable_display_ || has_webrtc_clients) ? draw_yolo_detections(frame) : frame;
+		const bool need_overlay = enable_display_ || has_webrtc_clients;
+		if (need_overlay && yolo_model_ && frame_idx % 5 == 0) {
+			if (!yolo_queue.try_push(frame.clone(), 1)) {
+				cv::Mat stale;
+				yolo_queue.try_pop(stale);
+				yolo_queue.try_push(frame.clone(), 1);
+			}
+		}
+		++frame_idx;
+
+		std::vector<DetectionPose> detections_snapshot;
+		if (need_overlay) {
+			std::lock_guard<std::mutex> lock(latest_yolo_mtx);
+			detections_snapshot = latest_detections;
+		}
+		cv::Mat display_frame = need_overlay ? draw_yolo_detections(frame, detections_snapshot) : frame;
 
 		// 向编码队列投递帧副本；若队列已满（编码跟不上），丢弃最旧帧保持低延迟
 		// try_push(val, 2) 表示队列超过 2 帧时不入队，防止延迟积累
@@ -966,7 +1126,9 @@ int PilotWebServer::live(ThreadSafeQueue<cv::Mat>& display_queue, const std::str
 
 	// display_queue 耗尽后停止 encode 线程
 	encode_queue.stop();
+	yolo_queue.stop();
 	if (encode_thread.joinable()) encode_thread.join();
+	if (yolo_thread.joinable()) yolo_thread.join();
 
 	if (enable_display_) {
 		cv::destroyWindow("Pilot_" + camera_id);
@@ -1119,7 +1281,22 @@ int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_
 		report["actions"].push_back(item);
 	}
 	std::ofstream ofs("report_" + camera_id + ".json");
+	if (!ofs.is_open()) {
+		set_task_status(camera_id, "failed", "Failed to create report file.");
+		std::cerr << "[Tridet Thread] Failed to open report_" << camera_id << ".json for writing." << std::endl;
+		return -1;
+	}
 	ofs << report.dump(4);
+	ofs.close();
+	if (!ofs.good()) {
+		set_task_status(camera_id, "failed", "Failed to write report file.");
+		std::cerr << "[Tridet Thread] Failed to write report_" << camera_id << ".json." << std::endl;
+		return -1;
+	}
+
+	if (get_task_status_json(camera_id).value("status", "unknown") != "failed") {
+		set_task_status(camera_id, "completed", "Analysis completed.");
+	}
 	
 	std::cout << "[Tridet Thread] Report saved to report_" << camera_id << ".json. Process Exited" << std::endl;
 	return 0;
