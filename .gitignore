@@ -20,3 +20,4 @@
 /ultralytics
 /yolo/config/best.onnx
 /dist
+/final_models

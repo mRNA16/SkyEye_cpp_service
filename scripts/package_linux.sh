@@ -211,6 +211,41 @@ copy_file_required "$ROOT/yolo/config/best.onnx" "$DIST/models/best.onnx"
 copy_file_required "$ROOT/client/index.html" "$DIST/client/index.html"
 copy_file_required "$ROOT/config/pilot_deploy.linux.properties" "$DIST/config/pilot_deploy.linux.properties"
 
+write_model_manifest() {
+  local manifest="$DIST/MODEL_MANIFEST.txt"
+  {
+    echo "Pilot model manifest"
+    echo "Generated: $(date '+%Y-%m-%d %H:%M:%S %z')"
+    echo "Package: $DIST"
+    echo
+
+    echo "[I3D feature extractor]"
+    echo "source=i3d/models/a320_new_full.onnx"
+    echo "target=models/a320_new_full.onnx"
+    echo "bytes=$(wc -c < "$ROOT/i3d/models/a320_new_full.onnx")"
+    echo "last_write_time=$(date -r "$ROOT/i3d/models/a320_new_full.onnx" '+%Y-%m-%d %H:%M:%S')"
+    echo "note=Updated from final_models/特征提取"
+    echo
+
+    echo "[TriDet temporal detector]"
+    echo "source=algos/tridet_a320.onnx"
+    echo "target=models/tridet_a320.onnx"
+    echo "bytes=$(wc -c < "$ROOT/algos/tridet_a320.onnx")"
+    echo "last_write_time=$(date -r "$ROOT/algos/tridet_a320.onnx" '+%Y-%m-%d %H:%M:%S')"
+    echo "note=Updated from final_models/时序检测, 25 classes with per-class thresholds in service"
+    echo
+
+    echo "[YOLO object detector]"
+    echo "source=yolo/config/best.onnx"
+    echo "target=models/best.onnx"
+    echo "bytes=$(wc -c < "$ROOT/yolo/config/best.onnx")"
+    echo "last_write_time=$(date -r "$ROOT/yolo/config/best.onnx" '+%Y-%m-%d %H:%M:%S')"
+    echo "note=Kept unchanged by request"
+  } > "$manifest"
+}
+
+write_model_manifest
+
 if [[ -z "$FFMPEG_PATH" ]]; then
   FFMPEG_PATH="$(command -v ffmpeg || true)"
 fi

@@ -31,7 +31,7 @@ constexpr int INPUT_H = 224;
 constexpr int INPUT_W = 224;
 
 // Tridet / 新动作检测分类数
-constexpr int NUM_CLASSES = 17;
+constexpr int NUM_CLASSES = 25;
 
 // YOLO 姿态检测
 constexpr float YOLO_CONF_THRESHOLD = 0.25f;

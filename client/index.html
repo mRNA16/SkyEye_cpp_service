@@ -929,11 +929,21 @@
         let livePredPollTimer  = { id: null };
         let localPredPollTimer = { id: null };
 
-        // 类别标签映射（与 C++ 端 ACTION_CLASSES 顺序一致）
+        // 类别标签映射（与 C++ 端 ACTION_NAMES 顺序一致）
         const ACTION_LABELS = [
             '驾驶杆', '油门杆', '起落架', '减速板', '襟翼', '计算机',
-            '配平轮', '发动机开关', 'EFIS控制', '速度选择', '航向选择',
-            '高度选择', '垂直速度速度选择', '自动驾驶', '灯光控制', '警报灯', '其他'
+            '配平轮', '发动机开关', '发动机模式选择', '方向舵配平', 'EFIS控制',
+            '速度选择', '航向选择', '高度选择', '垂直速度选择', '自动驾驶',
+            '自动油门', '航向道模式', '快速爬升', '进近模式', '自动刹车',
+            '防滞刹车', '灯光控制', '警报灯', '其他'
+        ];
+
+        const ACTION_THRESHOLDS = [
+            0.25, 0.50, 0.60, 0.50, 0.60,
+            0.50, 0.50, 0.60, 0.60, 0.50,
+            0.60, 0.60, 0.60, 0.50, 0.60,
+            0.60, 0.60, 0.80, 0.80, 0.70,
+            0.60, 0.60, 0.50, 0.50, 0.50
         ];
 
         function startLivePredPolling(cameraId, logFn, timerRef) {
@@ -953,9 +963,9 @@
                         const key = JSON.stringify(data.predictions);
                         if (key !== lastKey) {
                             lastKey = key;
-                            // 过滤背景（label=0）并按分数降序取 top-3
+                            // 按类别阈值过滤并按分数降序取 top-3
                             const top = data.predictions
-                                .filter(p => p.label !== 0 && p.score >= 0.05)
+                                .filter(p => p.score >= (ACTION_THRESHOLDS[p.label] ?? 1.0))
                                 .sort((a, b) => b.score - a.score)
                                 .slice(0, 3);
                             if (top.length) {

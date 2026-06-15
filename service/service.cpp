@@ -74,6 +74,18 @@ void ReplaceOrInsertFmtp(std::string& sdp, int payload_type) {
 	}
 }
 
+float ActionScoreThreshold(int label) {
+	static const std::vector<float> thresholds = {
+		0.25f, 0.50f, 0.60f, 0.50f, 0.60f,
+		0.50f, 0.50f, 0.60f, 0.60f, 0.50f,
+		0.60f, 0.60f, 0.60f, 0.50f, 0.60f,
+		0.60f, 0.60f, 0.80f, 0.80f, 0.70f,
+		0.60f, 0.60f, 0.50f, 0.50f, 0.50f
+	};
+	if (label < 0 || label >= static_cast<int>(thresholds.size())) return 1.0f;
+	return thresholds[static_cast<size_t>(label)];
+}
+
 std::string ShellQuoteArg(const std::string& value) {
 #ifdef _WIN32
 	std::string escaped;
@@ -1192,11 +1204,13 @@ int PilotWebServer::extract_features(HybridVideoQueue& frame_queue, ThreadSafeQu
 	return 0;
 }
 
-// 定义对应的真实语义：从 0 背景，再到 1-16 代表具体的控制台动作
+// 定义对应的真实语义：label 0-24 对应阈值文件中的完整 25 个动作类别
 const std::vector<std::string> ACTION_NAMES = {
 	"Yoke","ThrottleLever","LandingGear","SpeedBrakes","Flap","Computer",
-	"TrimWheel","EngineSwitch","EFISControl","SpeedSel","HeadingSel",
-	"AltitudeSel","VerticalSpeedSel","AutoPilot","LightControl","AlartLight","Others"
+	"TrimWheel","EngineSwitch","EngineModeSel","RudTrim","EFISControl",
+	"SpeedSel","HeadingSel","AltitudeSel","VerticalSpeedSel","AutoPilot",
+	"AutoThrottle","LocalizerMode","RapidClimb","ApprochMode","AutoBrake",
+	"A/SKID","LightControl","AlartLight","Others"
 };
 
 int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_queue, float fps, const std::string& camera_id,
@@ -1244,6 +1258,12 @@ int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_
 			}
 		}
 	}
+	if (!final_global_probs.empty() && final_global_probs.size() != static_cast<size_t>(NUM_CLASSES)) {
+		std::cerr << "[Tridet Thread] I3D logits size " << final_global_probs.size()
+		          << " does not match TriDet classes " << NUM_CLASSES
+		          << ". Disable score fusion for this model pair." << std::endl;
+		final_global_probs.clear();
+	}
 
     // 2. 离线使用全特征重叠推理，并进行全局分值融合
 	std::vector<ActionSegment> global_segments = tridet_instance->RunOffline(all_features, static_cast<float>(fps), CHUNK_SIZE, final_global_probs);
@@ -1253,13 +1273,12 @@ int PilotWebServer::tridet_predict(ThreadSafeQueue<std::vector<float>>& feature_
 		return a.start_time < b.start_time; 
 	});
 	
-	// 3. 结果整合优化：合并相邻且同类的动作碎片，并提高过滤阈值
+	// 3. 结果整合优化：合并相邻且同类的动作碎片，并按类别阈值过滤
 	std::vector<ActionSegment> merged_segments;
 	float merge_thresh_sec = 1.2f;   // 缩短合并间距
-	float min_display_score = 0.10f; // 调回温和阈值，防止漏检
 
 	for (const auto& seg : global_segments) {
-		if (seg.score < min_display_score) continue;
+		if (seg.score < ActionScoreThreshold(seg.label)) continue;
 
 		if (merged_segments.empty() || 
 			seg.label != merged_segments.back().label || 

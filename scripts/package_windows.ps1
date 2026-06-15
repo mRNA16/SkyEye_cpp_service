@@ -6,6 +6,8 @@ param(
     [string]$CudaRoot = $env:CUDA_PATH,
     [string]$CudnnRoot = "",
     [string]$MsvcRedistRoot = "",
+    [string]$CmakeBuildPreset = "pilot-release",
+    [switch]$BuildRelease,
     [switch]$AllowDebugBuild,
     [switch]$SkipMsvcRuntime,
     [switch]$SkipCudaRuntime
@@ -15,6 +17,19 @@ $ErrorActionPreference = "Stop"
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $dist = Join-Path $root $OutputDir
+
+if ($BuildRelease) {
+    Write-Host "Building Release target with CMake preset: $CmakeBuildPreset"
+    Push-Location $root
+    try {
+        & cmake --build --preset $CmakeBuildPreset
+        if ($LASTEXITCODE -ne 0) {
+            throw "CMake build failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+    }
+}
 
 function Get-ExeRoot {
     param([string[]]$Candidates)
@@ -53,8 +68,8 @@ if (-not [string]::IsNullOrWhiteSpace($PreferredBuildDir)) {
     $candidateRoots += $PreferredBuildDir
 }
 $candidateRoots += @(
-    "pilot\x64\Release",
     "out\build\windows-release",
+    "pilot\x64\Release",
     "out\build\windows-base"
 )
 
@@ -298,18 +313,53 @@ if (-not $SkipCudaRuntime) {
     }
 }
 
-$models = @{
-    "i3d\models\a320_new_full.onnx" = "models\a320_new_full.onnx"
-    "algos\tridet_a320.onnx" = "models\tridet_a320.onnx"
-    "yolo\config\best.onnx" = "models\best.onnx"
-}
-foreach ($pair in $models.GetEnumerator()) {
-    $src = Join-Path $root $pair.Key
-    $dst = Join-Path $dist $pair.Value
+$models = @(
+    [PSCustomObject]@{
+        Name = "I3D feature extractor"
+        Source = "i3d\models\a320_new_full.onnx"
+        Target = "models\a320_new_full.onnx"
+        Note = "Updated from final_models\特征提取"
+    },
+    [PSCustomObject]@{
+        Name = "TriDet temporal detector"
+        Source = "algos\tridet_a320.onnx"
+        Target = "models\tridet_a320.onnx"
+        Note = "Updated from final_models\时序检测, 25 classes with per-class thresholds in service"
+    },
+    [PSCustomObject]@{
+        Name = "YOLO object detector"
+        Source = "yolo\config\best.onnx"
+        Target = "models\best.onnx"
+        Note = "Kept unchanged by request"
+    }
+)
+
+$modelManifest = @(
+    "Pilot model manifest",
+    "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')",
+    "Package: $dist",
+    ""
+)
+
+foreach ($model in $models) {
+    $src = Join-Path $root $model.Source
+    $dst = Join-Path $dist $model.Target
     if (-not (Test-Path $src)) {
         throw "Model not found: $src"
     }
     Copy-Item -Force $src $dst
+
+    $item = Get-Item $src
+    $modelManifest += @(
+        "[$($model.Name)]",
+        "source=$($model.Source)",
+        "target=$($model.Target)",
+        "bytes=$($item.Length)",
+        "last_write_time=$($item.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))",
+        "note=$($model.Note)",
+        ""
+    )
+    Write-Host "Model copied: $($model.Source) -> $($model.Target) ($($item.Length) bytes)"
 }
 
 Copy-Item -Force (Join-Path $root "client\index.html") (Join-Path $dist "client\index.html")
@@ -363,6 +413,7 @@ Target machine requirements:
 "@
 
 Set-Content -Path (Join-Path $dist "README_DEPLOY.txt") -Value $note -Encoding UTF8
+Set-Content -Path (Join-Path $dist "MODEL_MANIFEST.txt") -Value ($modelManifest -join [Environment]::NewLine) -Encoding UTF8
 
 Write-Host "Deployment package created at: $dist"
 Write-Host "Build root used: $buildRoot"
